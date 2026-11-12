@@ -29,7 +29,7 @@ fx.module('homeassistant.helpers.aiohttp_client',async_get_clientsession=lambda 
 select_names=('BooleanSelector','NumberSelector','NumberSelectorConfig','SelectSelector','SelectSelectorConfig',
  'TextSelector','TextSelectorConfig')
 selectors=fx.module('homeassistant.helpers.selector',SelectOptionDict=lambda **kw:kw,
- NumberSelectorMode=types.SimpleNamespace(BOX='box'),TextSelectorType=types.SimpleNamespace(PASSWORD='password'))
+ NumberSelectorMode=types.SimpleNamespace(BOX='box'),SelectSelectorMode=types.SimpleNamespace(LIST='list'),TextSelectorType=types.SimpleNamespace(PASSWORD='password'))
 for name in select_names:setattr(selectors,name,lambda *a,**kw:kw)
 fx.module('homeassistant.components.sensor',RestoreSensor=fx.Entity,SensorEntityDescription=lambda **kw:types.SimpleNamespace(**kw),
  SensorDeviceClass=types.SimpleNamespace(SIGNAL_STRENGTH='rssi',TIMESTAMP='timestamp',ENUM='enum'),
@@ -87,7 +87,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
   def read(batch):reads.append(True);return prop.fget(batch)
   with patch.object(fx.cc.ConfirmationBatch,'goal',property(read)):
    with self.assertRaises(fx.CommandExecutionFailed):await e.async_execute_group()
-  self.assertEqual(len(reads),1);self.assertEqual(c.polls,14);self.assertEqual(len(c.replays),3)
+  self.assertEqual(len(reads),1);self.assertEqual(c.polls,10);self.assertEqual(len(c.replays),3)
  async def test_unknown_passes_reschedulable_command_budget(self):
   client=fx.AwoxConnectZClient(fx.Hass(),fx.MAC,'mesh','password',default_transition=0,
    idle_disconnect=10,command_semaphore=asyncio.Semaphore(1),max_concurrent_commands=1,configured_mesh_id=fx.MID)
@@ -261,6 +261,7 @@ class SetupTests(unittest.IsolatedAsyncioTestCase):
   self.hass=types.SimpleNamespace(data={},loop=asyncio.get_running_loop(),config_entries=types.SimpleNamespace(
    async_forward_entry_setups=forward,async_unload_platforms=AsyncMock(return_value=True)))
   self.patches=[patch.object(setup,'AwoxConnectZClient',Client),
+   patch.object(setup,'async_attach',AsyncMock(return_value=types.SimpleNamespace(remove=AsyncMock()))),
    patch.object(setup.bluetooth,'async_register_advertisement_callback',register,create=True),
    patch.object(setup.bluetooth,'async_register_callback',register,create=True),
    patch.object(setup.bluetooth,'BluetoothScanningMode',types.SimpleNamespace(ACTIVE='active'),create=True)]

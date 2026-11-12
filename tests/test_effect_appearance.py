@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, Mock
 import test_small_diagnostic_fixes as fixtures
 opt = fixtures.opt
 from awox112.command.sequences import PlannedCommand, CommandKind as K
+from awox112.advertisement import parse_awox_advertisement
 
 class EffectAppearance(unittest.IsolatedAsyncioTestCase):
     asyncSetUp = fixtures.SmallDiagnosticFixes.asyncSetUp
@@ -59,5 +60,68 @@ class EffectAppearance(unittest.IsolatedAsyncioTestCase):
         self.e._attr_color_temp_kelvin=3200
         await self.run_group('Candle',[PlannedCommand(K.CCT,2700)],confirmed=False)
         self.assertEqual(self.e._attr_color_temp_kelvin,3200)
+
+    def advertisement(self, mode, *, hue=85, saturation=191, mired=250):
+        raw = bytearray(17)
+        raw[:2] = b'\x96\x20'
+        raw[6:8] = b'\x03\x00'
+        raw[9:11] = opt.fx.MID.to_bytes(2, 'little')
+        raw[11:13] = bytes((mode, 200))
+        raw[13:15] = mired.to_bytes(2, 'little')
+        raw[15:17] = bytes((hue, saturation))
+        return parse_awox_advertisement(bytes(raw))
+
+    async def test_candle_advertisement_updates_color_including_stored_effect(self):
+        for mode in (0x12, 0x13):
+            with self.subTest(mode=mode):
+                self.e._attr_hs_color = (10., 20.)
+                self.e._async_apply_advertisement_state(self.advertisement(mode))
+                self.assertAlmostEqual(self.e._attr_hs_color[0], 85 * 360 / 254)
+                self.assertAlmostEqual(self.e._attr_hs_color[1], 191 * 100 / 255)
+                self.assertEqual(self.e._attr_color_mode, opt.fx.ColorMode.HS)
+                self.assertEqual(self.e._attr_is_on, bool(mode & 1))
+                self.assertEqual(self.e._attr_effect, 'Candle')
+
+    async def test_candle_advertisement_updates_cct_and_mode(self):
+        for mode in (0x10, 0x11):
+            self.e._attr_color_temp_kelvin = 3200
+            self.e._attr_color_mode = opt.fx.ColorMode.HS
+            self.e._async_apply_advertisement_state(self.advertisement(mode))
+            self.assertEqual(self.e._attr_color_temp_kelvin, 4000)
+            self.assertEqual(self.e._attr_color_mode, opt.fx.ColorMode.COLOR_TEMP)
+
+    async def test_cycle_advertisement_updates_color_and_cct(self):
+        for mode in (0x04, 0x05, 0x06, 0x07):
+            with self.subTest(mode=mode):
+                self.e._attr_hs_color = (10., 20.)
+                self.e._attr_color_temp_kelvin = 3200
+                self.e._async_apply_advertisement_state(self.advertisement(mode))
+                self.assertEqual(self.e._attr_effect, 'Color cycle')
+                if mode & 2:
+                    self.assertAlmostEqual(self.e._attr_hs_color[0], 85 * 360 / 254)
+                    self.assertEqual(self.e._attr_color_mode, opt.fx.ColorMode.HS)
+                else:
+                    self.assertEqual(self.e._attr_color_temp_kelvin, 4000)
+                    self.assertEqual(self.e._attr_color_mode, opt.fx.ColorMode.COLOR_TEMP)
+
+    async def test_effect_advertisement_hue_ff_retains_last_convertible_hs(self):
+        for mode in (0x07, 0x13):
+            self.e._attr_hs_color = (120., 75.)
+            self.e._async_apply_advertisement_state(self.advertisement(mode, hue=255, saturation=255))
+            self.assertEqual(self.e._attr_hs_color, (120., 75.))
+            self.assertEqual(self.e._attr_brightness, 200)
+            self.assertEqual(self.e._attr_color_mode, opt.fx.ColorMode.HS)
+
+    async def test_effect_advertisement_hue_fe_wraps_and_saturation_ff_is_valid(self):
+        self.e._async_apply_advertisement_state(self.advertisement(0x13, hue=254, saturation=255))
+        self.assertEqual(self.e._attr_hs_color, (0., 100.))
+
+    async def test_effect_advertisement_does_not_publish_during_active_command_group(self):
+        self.e._executor = types.SimpleNamespace(busy=True)
+        self.e._attr_hs_color = (10., 20.)
+        before = len(self.writes)
+        self.e._async_apply_advertisement_state(self.advertisement(0x13))
+        self.assertEqual(self.e._attr_hs_color, (10., 20.))
+        self.assertEqual(len(self.writes), before)
 
 if __name__=='__main__':unittest.main(verbosity=2)

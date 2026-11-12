@@ -1,4 +1,4 @@
-"""Session-scoped, bounded storage of validated direct-lamp status replies."""
+"""Session-scoped, bounded storage of validated target-lamp status replies."""
 from __future__ import annotations
 
 import asyncio
@@ -75,7 +75,8 @@ class Status1911State:
 
 
 class Status1911Store:
-    def __init__(self, mac: str, mesh_id: int | None):
+    def __init__(self, mac: str, mesh_id: int | None, *, outer_type: int = 0x80):
+        self.outer_type = outer_type
         compact = mac.replace(":", "").replace("-", "")
         self.mac_suffix = bytes.fromhex(compact)[-4:][::-1]
         self.mesh_id = mesh_id
@@ -105,7 +106,12 @@ class Status1911Store:
         self.frames.clear()
         self.changed.set()
 
-    def feed(self, payload: bytes, key: bytes, generation: int) -> None:
+    def feed(self, payload: bytes, key: bytes, generation: int) -> dict | None:
+        """Decode once and return the envelope for other target stores.
+
+        A returned envelope is not proof of a match to this store's identity.
+        Each receiving store must independently call accept_decoded().
+        """
         if not self.active or generation != self.session_generation:
             return
         try:
@@ -117,9 +123,16 @@ class Status1911Store:
                 received_monotonic=time.monotonic(),
             )
             return
-        # 1.12 confirms only the directly connected lamp. Decode mesh replies
-        # for classification, but never publish or confirm state from them.
-        if raw["outer_type"] == 0x82:
+        self.accept_decoded(raw, generation)
+        return raw
+
+    def accept_decoded(self, raw: dict, generation: int) -> None:
+        """Accept a protocol-validated envelope only for this target/session."""
+        if not self.active or generation != self.session_generation:
+            return
+        # Each store belongs to one physical gateway and session, one target,
+        # and exactly one path type. Direct and forwarded replies never mix.
+        if raw["outer_type"] != self.outer_type:
             self.ignored_mesh_frames += 1
             return
         if raw["mesh_id"] != self.mesh_id or raw["mac_suffix"] != self.mac_suffix:
@@ -134,6 +147,7 @@ class Status1911Store:
             raw["mired"] if not mode & 2 and raw["mired"] not in (0, 65535) else None,
             raw["hue"] if mode & 2 else None,
             raw["saturation"] if mode & 2 else None,
+            outer_type=raw["outer_type"],
         )
         self.frames.append(state)
         self.last_received = state

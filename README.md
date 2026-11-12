@@ -8,7 +8,10 @@ Unofficial integration for **EGLO / AwoX Connect.Z RGB/TW lights**, controlled l
 over Home Assistant Bluetooth adapters and **ESPHome Bluetooth Proxies**.
 Import lamp data from HomeControl or set up a mesh locally using known credentials.
 Normal light control does not use the cloud or require modified lamp firmware.
-Each lamp is connected directly; mesh forwarding and route selection are not supported.
+Lamps can be connected directly or controlled through a learned Connect.Z mesh
+gateway. Version 1.13.0 has targeted two-lamp ESPHome/BLE checks and
+Home Assistant acceptance checks, including user-observed physical light output.
+Compatibility with other hardware and larger meshes still needs confirmation.
 
 > **Experimental / community-supported:** compatibility beyond the tested hardware
 > still needs confirmation.
@@ -24,6 +27,8 @@ review and device compatibility reports are welcome.
 
 - Power, brightness, hue/saturation color, tunable white (**2700–6500 K**), transitions and the native **Color cycle** / **Candle** effects.
 - HomeControl import, fully local setup and Reconfigure for lamp/mesh management.
+- Directed mesh learning through 1911 status queries, shared gateway connections and target-specific group confirmation.
+- Mesh management with target selection, learning progress/results, a route matrix, preferred/blocked gateways and connection measurements.
 - State updates from BLE advertisements, command-group confirmation through session-scoped 1911 replies, and configurable availability.
 - On-demand BLE connections, idle disconnect, configurable command concurrency and same-lamp latest-wins command coalescing.
 - Bluetooth discovery of additional provisioned lamps plus per-lamp diagnostic sensors and credential-redacted diagnostics.
@@ -32,14 +37,19 @@ review and device compatibility reports are welcome.
 |---|---|---|---|---|
 | EGLO `900024/12253` | `EGLO-ZM-RGB-TW` | `3.0.2` | `4.62` | Power, brightness, HS color, color temperature, Color cycle, Candle |
 
+Native AwoX group entities and group-membership management are not included.
+Several individual lamp entities can still be controlled together, including
+through a shared gateway.
+
 ## Installation
 
 Requires **Home Assistant 2026.10+**, its Bluetooth integration, and a connectable
-adapter or ESPHome Bluetooth Proxy within connection range of the lamps.
+adapter or ESPHome Bluetooth Proxy within connection range of a direct lamp or
+mesh gateway. Mesh targets must already be configured with their MAC and mesh ID.
 Control requires a known lamp state. Fresh advertisements can supply it; if it is
 unknown at request time, the integration connects and makes a bounded 1911 status
 query before planning. Normal control also requires working 1911 notifications
-on the directly connected lamp. Raw advertisements remain an independent state
+on the directly connected lamp or selected gateway. Raw advertisements remain an independent state
 source. An unresolved unknown state fails the request instead of waiting indefinitely.
 
 **HACS:** Add `https://github.com/jakob8st8rm4nn/home-assistant-awox-connect-z` under
@@ -94,25 +104,45 @@ Home Assistant may also discover newly provisioned lamps through Bluetooth. Conf
 the discovery to verify them against an existing mesh and add them. Factory-reset
 lamps or lamps with different mesh credentials cannot join through that flow.
 
+### Learn mesh routes
+
+Open **Configure → Mesh management → Learn mesh routes** and select the target
+lamps. The integration checks directed paths using status queries, without test
+switching or advertisement waits. Five fixed rounds reconnect each gateway and
+show the confirmed checks per direction, for example 4/5.
+Closing the dialog that started learning cancels it and retains completed results.
+If Mesh is disabled, enable it in Runtime settings first, save, then reopen learning.
+
+A successful query permits a later control attempt; that command still needs its
+own target confirmation. Mesh management also provides an overview, matrix,
+per-light preferred/blocked gateways and resettable connection measurements.
+Without an eligible user preference, ready or already reserved suitable gateways
+are reused before opening another connection. Different targets can be sent
+commands without waiting for one another's group confirmation.
+See [Mesh architecture and behavior](docs/mesh.md).
+
 ## Per-lamp diagnostics
 
 | Sensor | Meaning |
 |---|---|
 | Signal Strength | RSSI from the last received advertisement; retained as historical data. |
 | Last Seen | Time of the last received Bluetooth advertisement. |
-| Bluetooth Status | Connected, visible, recently connected, unreachable, or unknown. See the rules below. |
+| Connection status | Connected, visible, recently connected, mesh connected, mesh available, unreachable, or unknown. See the rules below. |
 | Mesh ID | Stored mesh address; attributes show the advertised address and whether it matches. |
 | Last Bluetooth Source | Bluetooth source of the last received advertisement; retained independently of connection state. |
-| Last Connection | Adapter/proxy used for the last successfully authenticated connection, when identifiable. |
+| Last Connection | Adapter/proxy used for the last successfully authenticated direct connection, when identifiable. |
+| Last mesh gateway | Mesh ID of the gateway used for the last confirmed mesh command; retained as history. |
 
-The light is available while connected, visible or recently connected. One
+The light is available while connected, visible, recently connected, mesh connected
+or mesh available. Mesh availability permits an attempt and is not a guarantee
+that the target will answer. One
 **Availability timeout** applies independently to the last advertisement and the
 last connection proof. When disconnected and both are still valid, the newer
 evidence decides the status: the final connection proof remains recently connected
 until a newer advertisement arrives. A regular idle disconnect records its final
 known live connection before cleanup; unexpected link loss does not start a new timeout.
-With no evidence the status is unknown and the light is unavailable. Once known
-evidence expires, status is unreachable and the light is unavailable.
+With neither direct evidence nor learned paths the status is unknown. Once known
+direct evidence expires and no usable mesh path remains, the light is unavailable.
 
 Reload preserves original evidence timestamps within the same HA process, without
 resetting evidence ages or restoring BLE sessions. A still-active connection at unload
@@ -130,7 +160,10 @@ Mesh-ID mismatches are reported without changing the stored address.
 
 ## Settings
 
-Open the integration and choose **Configure**. Options apply to its mesh entry.
+Open **Configure → Runtime settings** for the operating options and the mesh
+enable/disable switch. **Mesh management** contains learning and management actions. Runtime options
+and the enable switch apply to this entry; routes and gateway rules are shared
+with entries using the same mesh credentials.
 
 | Setting | Default | Purpose |
 |---|---|---|
@@ -138,7 +171,8 @@ Open the integration and choose **Configure**. Options apply to its mesh entry.
 | Command interval | 250 ms | Minimum spacing between consecutive writes to the same lamp; configurable from 0–2000 ms. |
 | Idle disconnect | 10 s | Release the BLE connection after inactivity. A longer value can speed up repeated control but occupies a connection slot longer. |
 | Max Concurrent Commands | 2 | Allow 1–32 simultaneous command operations per entry. Available adapter/proxy capacity still limits operation. |
-| Availability timeout | 30 s | Mark a lamp unavailable after 10–300 seconds without Bluetooth liveness or a working HA connection. |
+| Availability timeout | 30 s | Lifetime of direct advertisement/connection evidence (10–300 seconds); also determines whether a disconnected gateway remains usable. |
+| Use mesh routes | Enabled | Permit this entry's lamps to act as mesh targets and gateways. Routes must be learned first. |
 
 - **Connections:** New connections are established one at a time across AwoX entries. Connected lamps can be controlled in parallel, within the configured limit and available Bluetooth slots.
 - **Rapid changes:** A started command group finishes, including confirmation and any repeat. New requests are collected separately; newer values replace older waiting targets. Even OFF waits for the running group. Replaced waiting targets do not produce superseded errors.
@@ -152,6 +186,7 @@ Open the integration and choose **Configure**. Options apply to its mesh entry.
 - [Command sequences](docs/command-sequences.md): command order, spacing and recovery rules.
 - [Known firmware behavior](docs/known-firmware-behavior.md): observed timing and state-reporting limitations.
 - [Protocol reference](docs/protocol.md): frames and advertisement formats.
+- [Mesh architecture](docs/mesh.md): routing, learning, gateway lifetime and status meanings.
 
 ## Troubleshooting
 
@@ -189,7 +224,8 @@ successful 1911 group confirmation or initial UNKNOWN-state query. Other 1911
 replies do not overwrite the displayed state or planner. Neither source proves
 physical light output. Allow advertisements to resume after an active BLE
 connection ends. For native effects, a group confirmation may update the displayed
-color/CCT; later effect advertisements preserve that appearance.
+color/CCT; later effect advertisements also update convertible color/CCT.
+An unconvertible hue `0xFF` retains the last displayed HS color.
 Model and firmware differences may also affect state decoding.
 
 ## Reports and contributions

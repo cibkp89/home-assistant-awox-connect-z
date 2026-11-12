@@ -52,6 +52,7 @@ from .const import (
     SETUP_CONNECT_ATTEMPTS,
     STATUS_CHAR_UUID,
     CONFIRMATION_MAX_POLLS,
+    GATEWAY_CONTROL_INTERVAL_MS,
     CONFIRMATION_POLL_WINDOW_MS,
 )
 from .protocol import encrypt_command, make_pair_packet, make_session_key, make_status_query
@@ -69,6 +70,10 @@ class AwoxDeviceNotFound(AwoxConnectZError):
 
 class AwoxAuthenticationError(AwoxConnectZError):
     """Lamp rejected the local mesh credential."""
+
+
+class CommandPreparationFailed(AwoxConnectZError):
+    """No route could be prepared; no lamp command has been selected."""
 
 
 class RuntimeCommandStatus(str, Enum):
@@ -166,6 +171,11 @@ class AwoxConnectZClient:
             int(configured_mesh_id) if configured_mesh_id is not None else None
         )
         self.status_1911 = Status1911Store(self.mac, self.configured_mesh_id)
+        self._mesh_status_stores = {}
+        self._last_control_write_finished = 0.0
+        self.mesh_dispatch = None
+        self.mesh_status_provider = None
+        self.mesh_history_provider = None
         self.confirmation = CommandConfirmation(self)
         self._session_generation = 0
         self._status_ready_generation: int | None = None
@@ -190,6 +200,16 @@ class AwoxConnectZClient:
         self._diagnostic_listeners: set[Callable[[], None]] = set()
         self._last_connection_source: str | None = None
         self._last_connection_observed = False
+        self._ble_connection_observer = None
+
+    def _note_ble_connection(self, outcome: str, started: float) -> None:
+        """Passive telemetry around connect() only; never affect BLE cleanup."""
+        if self._ble_connection_observer is not None:
+            try:
+                self._ble_connection_observer(outcome, (time.monotonic() - started) * 1000,
+                                              self.signal_strength)
+            except Exception:
+                _LOGGER.exception("Could not record AwoX BLE connection measurement")
 
     @callback
     def _record_error(
@@ -385,13 +405,30 @@ class AwoxConnectZClient:
         self._refresh_last_seen_from_ha()
         return self._availability.last_seen
 
-    def _derive_bluetooth_status(self) -> str | None:
+    @property
+    def direct_status(self) -> str | None:
+        """Direct evidence only: gateways cannot recursively depend on Mesh."""
         connected = self.connected
         if not connected:
             self._refresh_last_seen_from_ha()
         return self._availability.status(
             time.monotonic(), self.availability_timeout, connected=connected
         )
+
+    def _derive_bluetooth_status(self) -> str | None:
+        direct = self.direct_status
+        mesh = self.mesh_status_provider() if self.mesh_status_provider else None
+        return self._availability.combine_status(direct, mesh)
+
+    @property
+    def last_mesh_gateway(self) -> int | None:
+        return self.mesh_history_provider() if self.mesh_history_provider else None
+
+    def async_refresh_mesh_status(self) -> None:
+        self._async_notify_diagnostic_listeners()
+
+    def note_confirmed(self) -> None:
+        """Direct confirmation needs no additional route history."""
 
     @property
     def bluetooth_status(self) -> str | None:
@@ -746,6 +783,8 @@ class AwoxConnectZClient:
         self._session_generation += 1
         self._status_ready_generation = None
         self.status_1911.end()
+        for store in self._mesh_status_stores.values():
+            store.end()
 
     async def _async_acquire_runtime_connect_lock(
         self,
@@ -855,6 +894,7 @@ class AwoxConnectZClient:
                     )
                     self._client = client
 
+                    connect_started = time.monotonic()
                     try:
                         async with asyncio.timeout(RUNTIME_CONNECT_TIMEOUT_SECONDS):
                             await client.connect(
@@ -862,16 +902,20 @@ class AwoxConnectZClient:
                                 dangerous_use_bleak_cache=use_cache,
                             )
                     except asyncio.CancelledError:
+                        self._note_ble_connection("cancelled", connect_started)
                         # Keep the shared connection-establishment slot until
                         # bounded proxy cleanup has completed.
                         await self._async_disconnect(cancel_idle=False)
                         raise
                     except Exception as err:
+                        self._note_ble_connection("failed", connect_started)
                         await self._async_disconnect(cancel_idle=False)
                         raise AwoxConnectZError(
                             f"Runtime BLE connect timed out after {RUNTIME_CONNECT_TIMEOUT_SECONDS:.1f}s"
                             if isinstance(err, TimeoutError) else f"Runtime BLE connect failed: {err}"
                         ) from err
+                    else:
+                        self._note_ble_connection("successful", connect_started)
                 finally:
                     self._runtime_connect_lock.release()
 
@@ -945,6 +989,8 @@ class AwoxConnectZClient:
 
         client = self._client
         self.status_1911.end()
+        for store in self._mesh_status_stores.values():
+            store.end()
         self._status_ready_generation = None
         self._session_key = None
 
@@ -1038,8 +1084,8 @@ class AwoxConnectZClient:
 
     async def async_verify_mesh_credentials(self) -> None:
         """Connect and authenticate without sending a lamp command."""
-        async with self._command_semaphore:
-            async with self._command_lock:
+        async with self._command_lock:
+            async with self._command_semaphore:
                 try:
                     await self._async_ensure_connected()
                     self._clear_current_error()
@@ -1082,8 +1128,8 @@ class AwoxConnectZClient:
                 selected_attempt = selected.attempt
             return selected
 
-        async with self._command_semaphore:
-            async with self._command_lock:
+        async with self._command_lock:
+            async with self._command_semaphore:
                 try:
                     async with asyncio.timeout(
                         RUNTIME_COMMAND_TIMEOUT_SECONDS
@@ -1169,6 +1215,10 @@ class AwoxConnectZClient:
             await self._async_disconnect(cancel_idle=True)
             return RuntimeCommandResult(RuntimeCommandStatus.PREPARATION_FAILED, error=error)
 
+        await self._async_wait_control_interval()
+        if expected_session is not None:
+            self._require_status_session(expected_session)
+
         # Final late-selection boundary. No await occurs between selection and
         # the checks/encryption that precede the physical GATT call.
         try:
@@ -1236,6 +1286,7 @@ class AwoxConnectZClient:
                 )
         except Exception as err:
             write_finished = time.monotonic()
+            self._last_control_write_finished = write_finished
             is_timeout = isinstance(err, TimeoutError)
             error = AwoxConnectZError(
                 f"GATT write timed out after {RUNTIME_WRITE_TIMEOUT_SECONDS:.1f}s"
@@ -1259,6 +1310,7 @@ class AwoxConnectZClient:
             )
 
         write_finished = time.monotonic()
+        self._last_control_write_finished = write_finished
         self._record_command_success(
             label,
             started_monotonic=command_started_monotonic,
@@ -1317,11 +1369,19 @@ class AwoxConnectZClient:
             raise AwoxConnectZError("Cannot initialize 1911 without authentication")
         generation, key = self._session_generation, self._session_key
         self.status_1911.begin(generation)
+        for store in self._mesh_status_stores.values():
+            store.begin(generation)
         def notification(_sender, payload):
             if self.connected:
                 before = self.status_1911.sequence
-                self.status_1911.feed(bytes(payload), key, generation)
-                if self.status_1911.sequence != before:
+                raw = self.status_1911.feed(bytes(payload), key, generation)
+                received = self.status_1911.sequence != before
+                for store in tuple(self._mesh_status_stores.values()):
+                    previous = store.sequence
+                    if raw is not None:
+                        store.accept_decoded(raw, generation)
+                    received |= store.sequence != previous
+                if received:
                     self._async_note_connection_liveness()
         try:
             async with asyncio.timeout(RUNTIME_WRITE_TIMEOUT_SECONDS):
@@ -1359,22 +1419,52 @@ class AwoxConnectZClient:
 
     async def _async_status_write(
         self, packet: Callable[[bytes], bytes], generation: int,
-        valid: Callable[[], bool] | None = None,
+        valid: Callable[[], bool] | None = None, *, control: bool = False,
     ) -> tuple[float, float]:
         """Write in an existing session; queue time never counts as reply freshness."""
         async with asyncio.timeout(RUNTIME_COMMAND_TIMEOUT_SECONDS):
-            async with self._command_semaphore:
-                async with self._command_lock:
+            async with self._command_lock:
+                async with self._command_semaphore:
                     self._require_status_session(generation)
                     if valid is not None and not valid():
                         raise ConfirmationSuperseded()
+                    if control:
+                        await self._async_wait_control_interval()
+                        self._require_status_session(generation)
+                        if valid is not None and not valid():
+                            raise ConfirmationSuperseded()
                     encoded = packet(self._session_key)
-                    async with asyncio.timeout(RUNTIME_WRITE_TIMEOUT_SECONDS):
-                        started = time.monotonic()
-                        await self._client.write_gatt_char(
-                            COMMAND_CHAR_UUID, encoded, response=False,
-                        )
+                    try:
+                        async with asyncio.timeout(RUNTIME_WRITE_TIMEOUT_SECONDS):
+                            started = time.monotonic()
+                            await self._client.write_gatt_char(COMMAND_CHAR_UUID, encoded, response=False)
+                    finally:
+                        if control:
+                            self._last_control_write_finished = time.monotonic()
                     return started, time.monotonic()
+
+    def status_for_target(self, mac: str, mesh_id: int) -> Status1911Store:
+        """Return an identity-bound store owned by this physical gateway."""
+        if mac == self.mac and mesh_id == self.configured_mesh_id:
+            return self.status_1911
+        identity = (mac, mesh_id)
+        if identity not in self._mesh_status_stores:
+            store = Status1911Store(mac, mesh_id, outer_type=0x82)
+            self._mesh_status_stores[identity] = store
+            if self.status_1911.active:
+                store.begin(self.status_1911.session_generation)
+        return self._mesh_status_stores[identity]
+
+    def forget_status_target(self, mac: str) -> None:
+        """Release a removed target without affecting other gateway users."""
+        for identity in tuple(self._mesh_status_stores):
+            if identity[0] == mac:
+                self._mesh_status_stores.pop(identity).end()
+
+    async def async_poll_target_status(self, generation: int, mesh_id: int, valid=None):
+        return await self._async_status_write(
+            lambda key: make_status_query(key, mesh_id), generation, valid,
+        )
 
     async def async_poll_status(self, generation: int) -> None:
         await self._async_status_write(
@@ -1385,15 +1475,23 @@ class AwoxConnectZClient:
         self, frame: bytes, generation: int, valid: Callable[[], bool],
     ) -> tuple[float, float]:
         return await self._async_status_write(
-            lambda key: encrypt_command(key, frame), generation, valid,
+            lambda key: encrypt_command(key, frame), generation, valid, control=True,
         )
+
+    async def _async_wait_control_interval(self):
+        remaining = self._last_control_write_finished + GATEWAY_CONTROL_INTERVAL_MS / 1000 - time.monotonic()
+        if remaining > 0:
+            await asyncio.sleep(remaining)
+
+
+
 
     async def async_initial_status(self):
         """Bounded UNKNOWN bootstrap; never called before an ordinary known-state request."""
         started = time.monotonic()
         async with self.status_transaction():
-            async with self._command_semaphore:
-                async with self._command_lock:
+            async with self._command_lock:
+                async with self._command_semaphore:
                     async with asyncio.timeout(RUNTIME_COMMAND_TIMEOUT_SECONDS) as budget:
                         await self._async_ensure_connected(
                             fast_runtime=True, runtime_command_timeout=budget,

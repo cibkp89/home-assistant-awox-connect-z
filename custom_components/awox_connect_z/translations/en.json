@@ -161,20 +161,159 @@
   "options": {
     "step": {
       "init": {
-        "title": "AwoX Connect.Z options",
+        "title": "AwoX Connect.Z",
+        "description": "Choose what you want to open. Mesh management combines mesh learning, per-light rules, and metrics.",
+        "menu_options": {
+          "runtime": "Runtime settings",
+          "mesh": "Mesh management"
+        },
+        "menu_option_descriptions": {
+          "runtime": "Existing transition, BLE idle, concurrency and availability settings.",
+          "mesh": "Learn the mesh, manage per-light rules, and view metrics for the Connect.Z mesh."
+        }
+      },
+      "runtime": {
+        "title": "Runtime settings",
         "data": {
           "default_transition": "Default transition in seconds",
           "command_interval_ms": "Minimum command interval (ms)",
           "idle_disconnect": "Disconnect BLE after idle time (seconds)",
           "max_concurrent_commands": "Maximum concurrent lamp commands",
-          "availability_timeout": "Unavailable after (seconds)"
+          "availability_timeout": "Unavailable after (seconds)",
+          "mesh_enabled": "Use mesh control"
         },
         "data_description": {
           "max_concurrent_commands": "Maximum number of AwoX lamp commands that may run at the same time for this mesh entry (1-32). New runtime BLE connection establishment is coordinated separately so queued connects do not consume their own connect timeout.",
           "availability_timeout": "Time without Bluetooth liveness or a working HA connection before a lamp is marked unavailable (10–300 seconds).",
-          "command_interval_ms": "Minimum time between consecutive GATT writes to the same lamp (0–2000 ms). Set 0 to disable intentional spacing."
+          "command_interval_ms": "Minimum time between consecutive GATT writes to the same lamp (0–2000 ms). Set 0 to disable intentional spacing.",
+          "mesh_enabled": "Enables confirmed mesh routes and saved gateway rules. When disabled, lights are controlled directly; saved results and rules are retained."
         }
+      },
+      "mesh": {
+        "title": "Mesh management",
+        "description": "Manage mesh status, learning, light settings, and BLE metrics.",
+        "menu_options": {
+          "mesh_overview": "Overview",
+          "mesh_learn": "Learn mesh",
+          "mesh_lamps": "Manage lights",
+          "mesh_matrix": "Mesh matrix",
+          "mesh_metrics": "Gateway lights · BLE metrics",
+          "init": "Back",
+          "mesh_observe": "Show active learning",
+          "mesh_cancel": "Cancel learning"
+        },
+        "menu_option_descriptions": {
+          "mesh_overview": "Stored learning results and confirmed paths for each light.",
+          "mesh_learn": "Determines which existing lights can be controlled through which gateway lights.",
+          "mesh_lamps": "Manage preferred and blocked gateways per light for automatic runtime selection.",
+          "mesh_matrix": "All checked gateway-to-target combinations.",
+          "mesh_metrics": "Real BLE connection metrics from mesh learning and normal light control."
+        }
+      },
+      "mesh_overview": {
+        "title": "Mesh overview",
+        "description": "{overview}",
+        "submit": "Back"
+      },
+      "mesh_learn": {
+        "title": "Learn mesh",
+        "description": "Determines which gateway lights can control your existing lights. Valid target replies are checked using 1911 status queries. The lights are not switched on or off.\n\n**Do not change lights manually, through an app, automation or switch during learning.** Connection or power interruptions can affect the checks.\n\n**No new devices are added.** Learning can take longer with many lights.",
+        "data": {
+          "targets": "Target lights"
+        },
+        "data_description": {
+          "targets": "These lights are learned as targets. Other existing lights can still serve as gateways."
+        },
+        "submit": "Start learning"
+      },
+      "mesh_progress": {
+        "title": "Learning in progress",
+        "description": ""
+      },
+      "mesh_result": {
+        "title": "Result",
+        "description": "{result}",
+        "menu_options": {
+          "mesh_result_back": "Back"
+        }
+      },
+      "mesh_cancel": {
+        "title": "Cancel learning",
+        "description": "Stop the active learning run? Completed results are retained.",
+        "submit": "Stop learning"
+      },
+      "mesh_lamps": {
+        "title": "Manage lights",
+        "description": "Select a target light. Preferred and blocked gateways are stored persistently and used by normal light control.",
+        "data": {
+          "target": "Target light"
+        },
+        "data_description": {
+          "target": "Only configured lights from this hub are shown."
+        },
+        "submit": "Open"
+      },
+      "mesh_lamp": {
+        "title": "Gateway settings",
+        "description": "{details}\n\n**Gateway selection**\n\nThe integration uses the direct connection or a confirmed mesh path. A suitable preferred gateway is tried first; blocked gateways remain excluded. Otherwise selection uses available connections and stored BLE metrics. If a connection fails before a write starts, exactly one suitable alternative is tried when available.\n\nAfter saving, the flow returns to Mesh management.",
+        "data": {
+          "preferred": "Preferred gateway light",
+          "blocked": "Blocked gateway lights"
+        },
+        "data_description": {
+          "preferred": "Tried first while the light remains an allowed candidate. If connection setup fails before a write, one suitable alternative may be tried.",
+          "blocked": "These gateways are always excluded for this target. Blocking “This light – direct BLE connection” also blocks the direct path to this light."
+        },
+        "submit": "Save"
+      },
+      "mesh_matrix": {
+        "title": "Mesh matrix",
+        "description": "{matrix}",
+        "submit": "Back"
+      },
+      "mesh_metrics": {
+        "title": "Gateway lights · BLE metrics",
+        "description": "{metrics}",
+        "menu_options": {
+          "mesh_metrics_reset": "Reset BLE metrics",
+          "mesh": "Back"
+        },
+        "menu_option_descriptions": {
+          "mesh_metrics_reset": "Deletes connection times, success counters, and stored RSSI values. Mesh results and gateway settings are kept."
+        }
+      },
+      "mesh_metrics_reset": {
+        "title": "Reset BLE metrics",
+        "description": "Deletes **all stored BLE metrics** for this mesh network: connection times, connection attempts/successes, and RSSI values.\n\n**Kept:** mesh-learning results, mesh matrix, preferred gateways, and blocked gateways.\n\nThe statistics start fresh afterwards.",
+        "submit": "Reset"
+      },
+      "mesh_observe": {
+        "title": "Show active learning"
+      },
+      "mesh_result_back": {
+        "title": "Back"
+      },
+      "mesh_cancelled": {
+        "title": "Learning cancelled",
+        "description": "Learning was stopped in a controlled way. Results already stored are kept.\n\n{result}",
+        "submit": "Back"
       }
+    },
+    "error": {
+      "mesh_not_ready": "Mesh is not loaded or is disabled for this entry.",
+      "mesh_no_targets": "Choose at least one configured, enabled target light.",
+      "mesh_learning_running": "A learning run is already active in this mesh network.",
+      "mesh_invalid_target": "This target light is no longer loaded.",
+      "mesh_invalid_gateway": "Choose existing gateways only; a preference requires a known path.",
+      "mesh_preferred_blocked": "A preferred gateway cannot also be blocked.",
+      "mesh_save_failed": "The change is active in memory but could not be saved persistently. Please save again.",
+      "mesh_learning_changed": "The learning run has changed. Please confirm again if you want to cancel the current run."
+    },
+    "abort": {
+      "mesh_not_ready": "Mesh is not loaded or is disabled for this entry."
+    },
+    "progress": {
+      "mesh_learning": "Mesh routes are being checked\n\n{status}"
     }
   },
   "entity": {
@@ -186,12 +325,14 @@
         "name": "Last Seen"
       },
       "bluetooth_status": {
-        "name": "Bluetooth Status",
+        "name": "Connection status",
         "state": {
           "connected": "Connected",
           "visible": "Visible",
           "unreachable": "Unreachable",
-          "recently_connected": "Recently connected"
+          "recently_connected": "Recently connected",
+          "mesh_connected": "Mesh connected",
+          "mesh_available": "Mesh available"
         }
       },
       "mesh_id": {
@@ -202,6 +343,9 @@
       },
       "last_connection": {
         "name": "Last Connection"
+      },
+      "last_mesh_gateway": {
+        "name": "Last mesh gateway"
       }
     }
   }

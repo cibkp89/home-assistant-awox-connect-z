@@ -2,6 +2,36 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.13.0] - 2026-11-12
+
+### Added
+
+- Learn directed mesh routes between configured lamps through identity-checked 1911 status queries, using five fixed rounds with a fresh, exclusive gateway session per round and no test switching or advertisement waits.
+- Share gateway connections across entries with identical mesh credentials, with independent per-target planning and session-scoped `0x82` command-group confirmation.
+- Add mesh management with target selection, learning progress/results, route overview and matrix, preferred/blocked gateways and bounded BLE connection measurements.
+- Persist identity-bound routes, learning results, gateway rules and Last mesh gateway; expose Mesh connected / Mesh available and a Last mesh gateway diagnostic sensor.
+
+### Changed
+
+- Use three manual confirmation queries before one complete sequence repeat and seven afterwards; UNKNOWN lookup and mesh learning retain seven queries.
+- Enforce 50 ms between physical gateway control writes while retaining per-target command/fade spacing; authentication, notification setup and status queries do not receive this control-write delay.
+- Prefer ready/shared gateways and use eligible BLE connection statistics to rank comparable candidates; last-gateway history and cancelled attempts do not bias quality ranking.
+- Allow one alternative route after connection preparation fails, but never retry a possibly sent group through another gateway. Retain identity-bound paths as connection candidates without treating stored routes alone as availability evidence.
+- Rename Bluetooth Status to Connection status while retaining the sensor's entity identity.
+
+### Fixed
+
+- Update convertible color/CCT from advertisements during native effects; retain the last HS color for unconvertible hue `0xFF`.
+- Share cold gateway preparation between simultaneous targets and allow other targets to write during fade/confirmation waits, retaining physical write serialization and per-target ordering.
+- Keep learning progress and already-running feedback visible; isolate observer cancellation, retain partial results and report persistence failures.
+- Recheck gateway rules, endpoint registrations and destination identities at preparation and command/query boundaries; reject unloading endpoints and release queued or active users safely.
+- Isolate storage/publication listener failures, preserve unreachable mesh history after route removal and restore direct control when mesh is disabled.
+
+### Tests
+
+- Extend offline regression coverage for mesh learning, route selection, shared preparation, identity/session checks, cancellation, persistence and entry lifecycle.
+- Complete targeted two-lamp ESPHome/BLE checks and Home Assistant acceptance. Physical output and the remaining connection-error check were confirmed by the user; broader hardware coverage remains open.
+
 ## [1.12.1] - 2026-10-28
 
 ### Changed

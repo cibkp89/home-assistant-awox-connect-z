@@ -1061,6 +1061,8 @@ class CommandManager:
         return self._in_flight
 
 
+
+
 __all__ = [
     "CommandManager",
     "CommandManagerError",

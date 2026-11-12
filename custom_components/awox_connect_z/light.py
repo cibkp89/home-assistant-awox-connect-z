@@ -122,7 +122,7 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
             minimum_interval_ms=minimum_command_interval_ms,
         )
         self._executor = CommandExecutor(
-            client,
+            getattr(client, "mesh_dispatch", None) or client,
             self._manager,
             mesh_id=self._mesh_id,
         )
@@ -228,11 +228,11 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
     def _async_apply_advertisement_state(
         self, state: AwoxAdvertisementState
     ) -> None:
-        self._async_apply_lamp_state(state)
+        self._async_apply_lamp_state(state, update_effect_appearance=True)
 
     @callback
     def _async_apply_lamp_state(
-        self, state: AwoxAdvertisementState, *, confirmed_group: bool = False
+        self, state: AwoxAdvertisementState, *, update_effect_appearance: bool = False
     ) -> None:
         """Apply a received lamp state outside a physical/confirmation batch."""
         if self._executor.busy:
@@ -247,9 +247,9 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
         else:
             self._set_effect_state_unknown()
 
-        # Only a confirmed group's final reply may update effect appearance.
-        # Unsolicited effect samples continue to preserve HA's last color/CCT.
-        if confirmed_group or state.effect not in NATIVE_EFFECTS:
+        # Advertisements and final confirmations supply effect appearance too.
+        # A hue without a defined angle still cannot replace the last HS value.
+        if update_effect_appearance or state.effect not in NATIVE_EFFECTS:
             if state.is_color_mode:
                 if (
                     state.hue_degrees is not None
@@ -284,9 +284,13 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
     @callback
     def _async_apply_status_1911(self, state, *, confirmed_group: bool = False) -> None:
         """Apply an explicit group-confirmation or UNKNOWN-bootstrap result."""
+        if state is None:
+            failed = self._manager.set_state(PlannerState(known=False, is_on=None, effect=None))
+            self._fail_waiters(failed, HomeAssistantError("AwoX group outcome is uncertain; a fresh status is required"))
+            return
         if not self._executor.busy:
             self._async_apply_lamp_state(
-                state.as_lamp_state(), confirmed_group=confirmed_group
+                state.as_lamp_state(), update_effect_appearance=confirmed_group
             )
 
     def _set_effect_state_known(self, effect: str | None) -> None:
@@ -421,6 +425,7 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
                 )
             self._resolve_completed_waiters()
 
+
     async def _async_submit_target(self, target: TargetState) -> None:
         """Submit one HA request and wait until its generation completes."""
         if self._entity_unloading:
@@ -458,65 +463,28 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Submit one combined Home Assistant ON target."""
-        transition = float(
-            kwargs.get(ATTR_TRANSITION, self._client.default_transition)
-        )
-        brightness_raw = kwargs.get(ATTR_BRIGHTNESS)
-        brightness = int(brightness_raw) if brightness_raw is not None else None
-        hs_color = kwargs.get(ATTR_HS_COLOR)
-        color_temp_kelvin = kwargs.get(ATTR_COLOR_TEMP_KELVIN)
-        effect_requested = ATTR_EFFECT in kwargs
-        effect_value = str(kwargs[ATTR_EFFECT]) if effect_requested else None
-
-        if effect_requested and effect_value not in self._attr_effect_list:
-            raise HomeAssistantError(
-                f"Unsupported AwoX Connect.Z effect: {effect_value}"
-            )
-
-        color: tuple[float, float] | None = None
-        if hs_color is not None:
-            color = (float(hs_color[0]), float(hs_color[1]))
-
-        cct: int | None = None
-        if color_temp_kelvin is not None:
-            cct = max(
-                MIN_COLOR_TEMP_KELVIN,
-                min(MAX_COLOR_TEMP_KELVIN, int(color_temp_kelvin)),
-            )
-
-        effect: str | None = None
-        stop_effect = False
-        if effect_requested:
-            if effect_value == EFFECT_OFF:
-                stop_effect = True
-            else:
-                effect = effect_value
-
-        positive_requires_on = (
-            (brightness is not None and brightness > 0)
-            or color is not None
-            or cct is not None
-            or effect is not None
-        )
-        power = None if positive_requires_on else True
-
-        await self._async_submit_target(
-            TargetState(
-                power=power,
-                brightness=brightness,
-                brightness_transition=(
-                    transition if brightness is not None else None
-                ),
-                color=color,
-                cct=cct,
-                appearance_transition=(
-                    transition if color is not None or cct is not None else None
-                ),
-                effect=effect,
-                stop_effect=stop_effect,
-            )
-        )
+        await self._async_submit_target(target_from_light_kwargs(kwargs, self._client.default_transition))
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Submit Power OFF; POWER OFF itself clears an active effect."""
         await self._async_submit_target(TargetState(power=False))
+
+
+def target_from_light_kwargs(kwargs, default_transition):
+    """Validate the HA fields for an individual lamp request."""
+    transition = float(kwargs.get(ATTR_TRANSITION, default_transition))
+    raw = kwargs.get(ATTR_BRIGHTNESS)
+    brightness = int(raw) if raw is not None else None
+    hs = kwargs.get(ATTR_HS_COLOR)
+    color = (float(hs[0]), float(hs[1])) if hs is not None else None
+    kelvin = kwargs.get(ATTR_COLOR_TEMP_KELVIN)
+    cct = max(MIN_COLOR_TEMP_KELVIN, min(MAX_COLOR_TEMP_KELVIN, int(kelvin))) if kelvin is not None else None
+    value = str(kwargs[ATTR_EFFECT]) if ATTR_EFFECT in kwargs else None
+    if value is not None and value not in (EFFECT_OFF, *NATIVE_EFFECTS):
+        raise HomeAssistantError(f"Unsupported AwoX Connect.Z effect: {value}")
+    effect = value if value in NATIVE_EFFECTS else None
+    positive = (brightness is not None and brightness > 0) or color is not None or cct is not None or effect is not None
+    return TargetState(power=None if positive else True, brightness=brightness,
+        brightness_transition=transition if brightness is not None else None,
+        color=color, cct=cct, appearance_transition=transition if color is not None or cct is not None else None,
+        effect=effect, stop_effect=value == EFFECT_OFF)

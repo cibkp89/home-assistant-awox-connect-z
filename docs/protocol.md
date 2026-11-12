@@ -18,14 +18,15 @@ Characteristic UUIDs share the prefix `00010203-0405-0607-0809-0a0b0c0d`.
 
 ### Command frame layout
 
-Ordinary controls use prefix `0x00` followed by an encrypted 16-byte block.
+Lamp controls use prefix `0x00`, followed by an encrypted 16-byte block.
+Native area/group controls and membership configuration are not supported.
 The plaintext layout is:
 
 | Bytes | Meaning |
 |---|---|
 | 0 | CRC8 over bytes 1 through `1 + length`, inclusive |
 | 1 | Length: six header bytes plus payload length |
-| 2–3 | Individual destination mesh ID, **big-endian** |
+| 2–3 | Individual destination, **big-endian** |
 | 4 | Endpoint `0x01` |
 | 5–6 | Cluster, **little-endian** |
 | 7 | Command |
@@ -61,7 +62,7 @@ Color Cycle uses EnhancedMoveHue with mode 1 and rate 3072, little-endian.
 The integration emits the tested short StopMoveStep frame; the two effects'
 stop commands are not interchangeable. Both effects run inside the lamp.
 
-## 1911 direct-lamp status
+## 1911 status
 
 After successful authentication, subscribe to 1911 and write the unencrypted byte
 `0x01` there once per session. Reuse this setup while the session remains active.
@@ -98,13 +99,16 @@ The decrypted block contains:
 Validation checks the envelope, marker, supported mode and color-field policy.
 State acceptance also requires the configured mesh ID, MAC suffix and current
 session. The MAC suffix is a consistency check, not separate authentication.
-Only direct type `0x80` may establish initial state or confirm commands in 1.12.1.
+A direct route accepts only `0x80`; an indirect route accepts only `0x82` for the
+configured target. Stores belong to a physical gateway and authentication
+generation as well as a target MAC/mesh ID. Equal generation numbers on different
+gateways do not share a store. UNKNOWN bootstrap and learning use these same checks.
 All accepted replies are stored, but the entity applies only the selected successful
 group-confirmation result or explicit UNKNOWN-bootstrap result. Completed groups
 update the planner internally; their display result is published only when no
 accepted follow-up requests remain open. Individual
-notifications do not synchronize the displayed state or planner. Decodable `0x82`
-replies are counted and ignored. The direct/mesh
+notifications do not synchronize the displayed state or planner. Forwarded replies
+never update the gateway lamp's state or invent a target advertisement. The direct/mesh
 mapping was observed with role-swapped lamps, not established for every firmware.
 
 Hue/saturation come from outer bytes 17/18; they are not derived from CCT.

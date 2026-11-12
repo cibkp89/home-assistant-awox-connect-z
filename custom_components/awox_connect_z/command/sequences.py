@@ -7,7 +7,7 @@ merging, latest-request handling, write spacing, BLE transport or retries.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import TypeAlias
 
@@ -343,6 +343,8 @@ def plan_commands(
         )
 
     return _plan_normal(state, normalized)
+
+
 
 
 __all__ = [

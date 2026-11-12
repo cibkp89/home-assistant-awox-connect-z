@@ -184,8 +184,8 @@ class Tests(unittest.IsolatedAsyncioTestCase):
     c.status_1911.feed(payload(dict(c.state,mode=5)),KEY,1)
   c.hook=response;m.submit(T(cct=4000))
   with self.assertRaises(CommandExecutionFailed):await e.async_execute_group()
-  self.assertEqual(c.polls,14);self.assertTrue(c.replays)
- def test_effect_reports_preserve_ha_color_cct_and_color_mode_from_both_sources(self):
+  self.assertEqual(c.polls,10);self.assertTrue(c.replays)
+ def test_effect_advertisements_update_appearance_but_bootstrap_preserves_it(self):
   from awox112.advertisement import parse_awox_advertisement
   for source in ('1911','advertisement'):
    for initial_mode in (ColorMode.HS,ColorMode.COLOR_TEMP):
@@ -198,8 +198,10 @@ class Tests(unittest.IsolatedAsyncioTestCase):
       else:
        raw=bytearray(17);raw[6:8]=bytes((3,0));raw[9:11]=MID.to_bytes(2,'little');raw[11]=mode;raw[12]=200;raw[13:15]=(250).to_bytes(2,'little');raw[15:17]=b'\xff\xff'
        entity._async_apply_advertisement_state(parse_awox_advertisement(bytes(raw)))
-      self.assertEqual(entity._attr_hs_color,(123.,45.));self.assertEqual(entity._attr_color_temp_kelvin,3500)
-      self.assertEqual(entity._attr_color_mode,initial_mode);self.assertEqual(entity._attr_brightness,200)
+      self.assertEqual(entity._attr_hs_color,(123.,45.))
+      self.assertEqual(entity._attr_color_temp_kelvin,4000 if source=='advertisement' and not mode&2 else 3500)
+      expected_mode=(ColorMode.HS if mode&2 else ColorMode.COLOR_TEMP) if source=='advertisement' else initial_mode
+      self.assertEqual(entity._attr_color_mode,expected_mode);self.assertEqual(entity._attr_brightness,200)
       self.assertEqual(entity._attr_is_on,bool(mode&1));self.assertEqual(entity._attr_effect,store.latest.effect)
  def test_static_reports_resume_appearance_updates_after_effect(self):
   for source in ('1911','advertisement'):
@@ -240,7 +242,7 @@ class Tests(unittest.IsolatedAsyncioTestCase):
     c.status_1911.feed(payload(c.state,outer_type=0x82),KEY,1)
   c.hook=mesh_feedback;m.submit(T(power=True))
   with self.assertRaises(CommandExecutionFailed):await e.async_execute_until_idle()
-  self.assertEqual(c.polls,14)
+  self.assertEqual(c.polls,10)
   self.assertTrue(c.replays)
   self.assertIsNone(c.status_1911.latest)
   self.assertGreater(c.status_1911.ignored_mesh_frames,0)
@@ -349,7 +351,7 @@ class Tests(unittest.IsolatedAsyncioTestCase):
    c.status_1911.feed(payload(state),KEY,1)
   c.feed=unsupported_feed;m.submit(T(color=(120,100)))
   with self.assertRaises(CommandExecutionFailed):await e.async_execute_group()
-  self.assertEqual(c.polls,14);self.assertTrue(c.replays)
+  self.assertEqual(c.polls,10);self.assertTrue(c.replays)
   self.assertIsNone(c.status_1911.latest);self.assertGreater(c.status_1911.invalid_frames,0)
  def notify_fixture(self,cccd=False,native=False,api_error=None,write_error=None,pause_init=False,standard_error=None):
   class API:
@@ -456,12 +458,12 @@ class Tests(unittest.IsolatedAsyncioTestCase):
   for mode in ['wrong','silent']:
    m,c,e=self.setup_group(mode);m.submit(T(cct=3500,brightness=200))
    with self.assertRaises(CommandExecutionFailed):await e.async_execute_group()
-   self.assertEqual(c.polls,14);self.assertEqual(len(c.replays),3)
+   self.assertEqual(c.polls,10);self.assertEqual(len(c.replays),3)
    self.assertEqual([c.frames[f].kind for f in c.replays],c.controls)
    self.assertFalse(m.state.known);self.assertFalse(m.pending_generations)
  async def test_repeat_can_confirm_without_repeating_semantic_effect(self):
   m,c,e=self.setup_group('repeat');m.submit(T(effect='Candle'))
-  await e.async_execute_group();self.assertEqual(c.polls,7);self.assertEqual(len(c.replays),2)
+  await e.async_execute_group();self.assertEqual(c.polls,3);self.assertEqual(len(c.replays),2)
   self.assertEqual(c.controls,[K.EFFECT_START,K.POWER_ON]);self.assertFalse(m.pending_generations)
  async def test_new_off_waits_for_complete_group_repeat(self):
   m,c,e=self.setup_group('repeat');m.submit(T(brightness=200));old=m.request_generation
@@ -488,7 +490,7 @@ class Tests(unittest.IsolatedAsyncioTestCase):
  async def test_stale_previous_reply_cannot_confirm_new_group(self):
   m,c,e=self.setup_group('silent');c.feed();m.submit(T(power=False))
   with self.assertRaises(CommandExecutionFailed):await e.async_execute_group()
-  self.assertEqual(c.polls,14)
+  self.assertEqual(c.polls,10)
  async def test_cancellation_releases_barrier_and_leaves_unknown(self):
   m,c,e=self.setup_group('silent');m.submit(T(effect='Candle'))
   task=asyncio.create_task(e.async_execute_group());await asyncio.sleep(.002);task.cancel()

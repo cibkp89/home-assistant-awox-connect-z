@@ -71,10 +71,12 @@ def make_session_key(
 
 
 def encrypt_command(session_key: bytes, plain16: bytes) -> bytes:
-    """Encrypt a 16-byte Connect.Z command and prepend the 0x00 prefix."""
+    """Encrypt an individual-addressed (00) control frame."""
     if len(plain16) != 16:
         raise ValueError("Connect.Z command must be exactly 16 bytes")
     return b"\x00" + aes_encrypt_reversed(session_key, plain16)
+
+
 
 
 def crc8_awox(data: bytes | bytearray) -> int:

@@ -7,7 +7,8 @@ from typing import Callable, Literal
 
 from .sequences import CommandKind as K, PlannedCommand
 from ..const import (CONFIRMATION_AUTO_WAIT_MS, CONFIRMATION_POLL_WINDOW_MS,
-                    CONFIRMATION_MAX_POLLS, CONFIRMATION_MAX_GROUP_REPEATS)
+                    CONFIRMATION_MAX_POLLS, CONFIRMATION_MAX_GROUP_REPEATS,
+                    CONFIRMATION_INITIAL_MAX_POLLS)
 from ..status_1911 import Status1911State, StatusGoal
 from .timing import with_fade_wait
 
@@ -123,7 +124,7 @@ class CommandConfirmation:
                 if state and state.matches(goal_provider()):
                     self.diagnostics["passive_confirmed"] += 1
                     return self._result("confirmed", state)
-                for _ in range(CONFIRMATION_MAX_POLLS):
+                for _ in range(CONFIRMATION_INITIAL_MAX_POLLS if attempt == 0 else CONFIRMATION_MAX_POLLS):
                     if not valid():
                         return self._result("superseded", None)
                     self._require_session(batch)

@@ -40,6 +40,7 @@ from .const import (
     DOMAIN,
 )
 from .protocol import is_valid_device_mesh_id
+from .mesh import async_attach, async_detach
 
 PLATFORMS = [Platform.LIGHT, Platform.SENSOR]
 _LOGGER = logging.getLogger(__name__)
@@ -108,6 +109,7 @@ async def async_setup_entry(
     clients: list[tuple[AwoxConnectZClient, dict]] = []
 
     cleanups = []
+    mesh_runtime = None
 
     def register_cleanup(callback):
         active = True
@@ -284,6 +286,7 @@ async def async_setup_entry(
                 hass.data.pop(DOMAIN)
             return False
 
+        mesh_runtime = await async_attach(hass, entry, clients)
         domain_data[entry.entry_id] = clients
         await hass.config_entries.async_forward_entry_setups(
             entry, PLATFORMS
@@ -291,6 +294,8 @@ async def async_setup_entry(
         return True
 
     except BaseException:
+        if mesh_runtime is not None:
+            await async_detach(hass, entry.entry_id)
         for cleanup in reversed(cleanups):
             try:
                 cleanup()
@@ -314,6 +319,7 @@ async def async_unload_entry(
     if unloaded:
         domain_data = hass.data[DOMAIN]
         clients = domain_data.pop(entry.entry_id)
+        await async_detach(hass, entry.entry_id)
         # Capture before closing: active connections provide a real final proof.
         # Keep this outside domain_data, whose runtime locks are discarded below.
         hass.data.setdefault(DATA_AVAILABILITY_EVIDENCE, {})[entry.entry_id] = {

@@ -5,6 +5,9 @@ from __future__ import annotations
 import asyncio
 import re
 import time
+from html import escape
+from datetime import datetime
+from statistics import median
 from typing import Any
 from uuid import uuid4
 
@@ -20,6 +23,7 @@ from homeassistant.config_entries import (
 )
 from homeassistant.const import CONF_PASSWORD
 from homeassistant.core import callback
+from homeassistant.util import dt as dt_util
 from homeassistant.helpers.selector import (
     BooleanSelector,
     NumberSelector,
@@ -28,6 +32,7 @@ from homeassistant.helpers.selector import (
     SelectOptionDict,
     SelectSelector,
     SelectSelectorConfig,
+    SelectSelectorMode,
     TextSelector,
     TextSelectorConfig,
     TextSelectorType,
@@ -1677,13 +1682,18 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class AwoxConnectZOptionsFlow(OptionsFlowWithReload):
-    """Runtime tuning options shared by all lamps in the config entry."""
+    """Runtime tuning and identity-bound 1911 mesh management."""
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
+        return self.async_show_menu(step_id="init", menu_options=["runtime", "mesh"])
+
+    async def async_step_runtime(self, user_input=None):
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+            data = {**self.config_entry.options, **user_input}
+            data.pop("mesh_learn", None)
+            return self.async_create_entry(title="", data=data)
 
         options = self.config_entry.options
         schema = vol.Schema(
@@ -1750,8 +1760,505 @@ class AwoxConnectZOptionsFlow(OptionsFlowWithReload):
                         mode=NumberSelectorMode.BOX,
                     )
                 ),
+                vol.Optional("mesh_enabled", default=options.get("mesh_enabled", True)): bool,
             }
         )
         return self.async_show_form(
-            step_id="init", data_schema=schema
+            step_id="runtime", data_schema=schema
         )
+
+    def _mesh_runtime(self):
+        from .mesh import DATA_MESH
+        return next((r for r in self.hass.data.get(DATA_MESH, {}).values()
+                     if self.config_entry.entry_id in r.entries), None)
+
+    def _mesh_text(self, de, en):
+        language = getattr(getattr(self.hass, "config", None), "language", "en")
+        return de if str(language).startswith("de") else en
+
+    def _mesh_label(self, mac):
+        runtime = self._mesh_runtime()
+        client = runtime.clients[mac]
+        device = runtime.devices.get(mac, {})
+        name = str(device.get("name") or device.get("model") or mac).replace("\n", " ")
+        return f"{name} · 0x{client.configured_mesh_id:04X}"
+
+    def _mesh_targets(self):
+        runtime = self._mesh_runtime()
+        members = runtime.entries.get(self.config_entry.entry_id, set())
+        return [mac for mac in runtime.clients if mac in members]
+
+    def _mesh_options(self, addresses, direct_target=None):
+        options = []
+        for mac in self._mesh_runtime().clients:
+            if mac not in addresses:
+                continue
+            label = self._mesh_label(mac) if direct_target is None else f"0x{self._mesh_runtime().clients[mac].configured_mesh_id:04X}"
+            if mac == direct_target:
+                label += self._mesh_text(" · Diese Lampe – direkte BLE-Verbindung", " · This light – direct BLE connection")
+            options.append(SelectOptionDict(value=mac, label=label))
+        return options
+
+    @staticmethod
+    def _mesh_cell(value):
+        return escape(str(value)).replace("|", "\\|").replace("\n", " ")
+
+    def _mesh_known_route(self, route):
+        clients = self._mesh_runtime().clients
+        return (route.gateway in clients and route.target in clients
+                and clients[route.gateway].configured_mesh_id == route.gateway_id
+                and clients[route.target].configured_mesh_id == route.target_id)
+
+    async def async_step_mesh(self, user_input=None):
+        runtime = self._mesh_runtime()
+        if runtime is None:
+            return self.async_abort(reason="mesh_not_ready")
+        options = [
+            "mesh_overview", "mesh_learn", "mesh_lamps", "mesh_matrix",
+            "mesh_metrics"]
+        if runtime.learning.task is not None and not runtime.learning.task.done():
+            options.extend(("mesh_observe", "mesh_cancel"))
+        return self.async_show_menu(step_id="mesh", menu_options=[*options, "init"])
+
+
+
+
+
+
+
+
+
+
+    async def async_step_mesh_overview(self, user_input=None):
+        if user_input is not None:
+            return await self.async_step_mesh()
+        runtime = self._mesh_runtime()
+        if runtime is None:
+            return self.async_abort(reason="mesh_not_ready")
+        return self.async_show_form(step_id="mesh_overview", data_schema=vol.Schema({}),
+                                    description_placeholders={"overview": self._mesh_summary()})
+
+    async def async_step_mesh_learn(self, user_input=None):
+        runtime = self._mesh_runtime()
+        if runtime is None:
+            return self.async_abort(reason="mesh_not_ready")
+        errors = {} if self.config_entry.options.get("mesh_enabled", True) else {"base": "mesh_not_ready"}
+        if not errors and runtime.learning.task is not None and not runtime.learning.task.done():
+            # Show the existing-run error on entry, before another Start click.
+            errors["base"] = "mesh_learning_running"
+        available = set(self._mesh_targets()) & runtime.enabled
+        if user_input is not None and not errors:
+            selected = user_input.get("targets", [])
+            if (not isinstance(selected, list) or not selected
+                    or not all(isinstance(mac, str) for mac in selected)
+                    or not set(selected) <= available):
+                errors["base"] = "mesh_no_targets"
+            elif not runtime.learning.start(set(selected)):
+                errors["base"] = "mesh_learning_running"
+            else:
+                self._mesh_track_learning(runtime, owner=True)
+                return await self.async_step_mesh_progress()
+        return self.async_show_form(step_id="mesh_learn", errors=errors, data_schema=vol.Schema({
+            vol.Required("targets", default=[mac for mac in self._mesh_targets() if mac in available]): SelectSelector(
+                SelectSelectorConfig(options=self._mesh_options(available), multiple=True, mode=SelectSelectorMode.LIST))}))
+
+    def _mesh_progress_text(self):
+        runtime = self._mesh_runtime()
+        if runtime is None:
+            return self._mesh_text("Mesh nicht geladen", "Mesh not loaded")
+        learning = runtime.learning
+        route = learning.current_route
+        activity = learning.activity
+        if activity == "connecting_gateway" and route is not None:
+            text = self._mesh_text(f"Verbinde mit Gateway 0x{route.gateway_id:04X} …",
+                                   f"Connecting to gateway 0x{route.gateway_id:04X} …")
+        elif activity == "gateway_connected" and route is not None:
+            text = self._mesh_text(f"Gateway 0x{route.gateway_id:04X} verbunden",
+                                   f"Gateway 0x{route.gateway_id:04X} connected")
+        elif activity == "waiting_gateway" and route is not None:
+            text = self._mesh_text(f"Warte auf Gateway 0x{route.gateway_id:04X} …",
+                                   f"Waiting for gateway 0x{route.gateway_id:04X} …")
+        elif activity == "testing_route" and route is not None:
+            text = self._mesh_text(f"Prüfe 0x{route.gateway_id:04X} → 0x{route.target_id:04X} …",
+                                   f"Checking 0x{route.gateway_id:04X} → 0x{route.target_id:04X} …")
+        else:
+            text = {
+                "saving": self._mesh_text("Speichere Ergebnis …", "Saving result …"),
+                "done": self._mesh_text("Anlernen abgeschlossen", "Learning complete"),
+                "cancelled": self._mesh_text("Anlernen wird beendet …", "Stopping learning …"),
+                "failed": self._mesh_text("Anlernen konnte nicht abgeschlossen werden", "Learning could not be completed"),
+            }.get(activity, self._mesh_text("Anlernen wird vorbereitet …", "Preparing learning …"))
+        text += "\n\n" + self._mesh_text("Durchlauf", "Round") + f": {learning.round}/5"
+        text += " · " + self._mesh_text("Geprüft", "Checked") + f": {learning.completed}/{learning.total}"
+        if route is not None:
+            text += f" · 0x{route.gateway_id:04X} → 0x{route.target_id:04X}"
+        return text
+
+    @callback
+    def _mesh_progress_changed(self):
+        step = getattr(self, "cur_step", None)
+        source = getattr(self, "_mesh_progress_source", None)
+        if (source is not None and source.task is getattr(self, "_mesh_task", None)
+                and source.report is getattr(self, "_mesh_report", None)
+                and isinstance(step, dict) and step.get("step_id") == "mesh_progress"):
+            placeholders = {"status": self._mesh_progress_text()}
+            if step.get("description_placeholders") != placeholders:
+                step["description_placeholders"] = placeholders
+                self.async_notify_flow_changed()
+
+    def _mesh_track_learning(self, runtime, *, owner=False):
+        task = runtime.learning.task
+        owns = owner or (getattr(self, "_mesh_owns_learning", False)
+                         and getattr(self, "_mesh_task", None) is task)
+        self._mesh_release_progress()
+        self._mesh_task = task
+        self._mesh_report = runtime.learning.report
+        self._mesh_owns_learning = owns
+        self._mesh_progress_source = runtime.learning
+        runtime.learning.listeners.add(self._mesh_progress_changed)
+
+    async def _mesh_wait_for_learning(self):
+        task = self._mesh_task
+        try:
+            # HA cancels its progress task before calling async_remove().
+            # Each dialog therefore owns only a shielded waiter, never the run.
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if not task.cancelled():
+                raise
+        except Exception:
+            pass  # async_step_mesh_progress reports the original task error.
+
+    def _mesh_unsubscribe(self):
+        source = getattr(self, "_mesh_progress_source", None)
+        if source is not None:
+            source.listeners.discard(self._mesh_progress_changed)
+            self._mesh_progress_source = None
+
+    def _mesh_release_progress(self):
+        self._mesh_unsubscribe()
+        waiter = getattr(self, "_mesh_progress_waiter", None)
+        if waiter is not None and not waiter.done():
+            waiter.cancel()
+        self._mesh_progress_waiter = None
+
+    @callback
+    def async_remove(self):
+        self._mesh_release_progress()
+        runtime = self._mesh_runtime()
+        if (runtime and getattr(self, "_mesh_owns_learning", False)
+                and runtime.learning.task is getattr(self, "_mesh_task", None)):
+            runtime.learning.cancel()
+
+    async def async_step_mesh_progress(self, user_input=None):
+        task = getattr(self, "_mesh_task", None)
+        if task is None:
+            return await self.async_step_mesh_observe()
+        if not task.done():
+            waiter = getattr(self, "_mesh_progress_waiter", None)
+            if waiter is None or waiter.done():
+                waiter = self._mesh_progress_waiter = self.hass.async_create_background_task(
+                    self._mesh_wait_for_learning(), "AwoX mesh learning dialog")
+            return self.async_show_progress(step_id="mesh_progress", progress_action="mesh_learning",
+                                            progress_task=waiter,
+                                            description_placeholders={"status": self._mesh_progress_text()})
+        # Consume unexpected task exceptions; report a failure, never false success.
+        if not task.cancelled() and task.exception() is not None:
+            self._mesh_report["error"] = "Unexpected learning error"
+        self._mesh_release_progress()
+        return self.async_show_progress_done(next_step_id=(
+            "mesh_cancelled" if self._mesh_report.get("cancelled") else "mesh_result"))
+
+    async def async_step_mesh_observe(self, user_input=None):
+        runtime = self._mesh_runtime()
+        if runtime is None:
+            return self.async_abort(reason="mesh_not_ready")
+        if runtime.learning.task is None:
+            return await self.async_step_mesh_learn()
+        self._mesh_track_learning(runtime)
+        return await self.async_step_mesh_progress()
+
+    def _mesh_result_text(self):
+        report = getattr(self, "_mesh_report", {})
+        lines = [self._mesh_summary(report)]
+        if report.get("error"):
+            lines.insert(0, self._mesh_text("Anlernen mit Fehler beendet.\n", "Learning ended with an error.\n"))
+        if report.get("save_error"):
+            lines.insert(0, self._mesh_text("Ergebnisse sind aktiv, konnten aber nicht dauerhaft gespeichert werden.\n", "Results are active but could not be saved persistently.\n"))
+        return "\n".join(lines)
+
+    async def async_step_mesh_result(self, user_input=None):
+        return self.async_show_menu(step_id="mesh_result", menu_options=["mesh_result_back"],
+                                    description_placeholders={"result": self._mesh_result_text()})
+
+    async def async_step_mesh_cancelled(self, user_input=None):
+        if user_input is not None:
+            return await self.async_step_mesh()
+        return self.async_show_form(step_id="mesh_cancelled", data_schema=vol.Schema({}),
+                                    description_placeholders={"result": self._mesh_result_text()})
+
+    async def async_step_mesh_result_back(self, user_input=None):
+        return await self.async_step_mesh()
+
+    async def async_step_mesh_cancel(self, user_input=None):
+        runtime = self._mesh_runtime()
+        if runtime is None:
+            return self.async_abort(reason="mesh_not_ready")
+        errors = {}
+        if user_input is None:
+            self._mesh_cancel_task = runtime.learning.task
+        elif runtime.learning.task is not getattr(self, "_mesh_cancel_task", None):
+            self._mesh_cancel_task = runtime.learning.task
+            errors["base"] = "mesh_learning_changed"
+        else:
+            self._mesh_report = runtime.learning.report
+            await runtime.learning.stop()
+            return await self.async_step_mesh_cancelled()
+        return self.async_show_form(step_id="mesh_cancel", data_schema=vol.Schema({}), errors=errors)
+
+    async def async_step_mesh_lamps(self, user_input=None):
+        runtime = self._mesh_runtime()
+        if runtime is None:
+            return self.async_abort(reason="mesh_not_ready")
+        errors = {}
+        if user_input is not None:
+            target = user_input.get("target")
+            if target not in self._mesh_targets():
+                errors["base"] = "mesh_invalid_target"
+            else:
+                self._mesh_target = target
+                return await self.async_step_mesh_lamp()
+        return self.async_show_form(step_id="mesh_lamps", errors=errors, data_schema=vol.Schema({
+            vol.Required("target"): SelectSelector(SelectSelectorConfig(options=self._mesh_options(self._mesh_targets()), mode=SelectSelectorMode.LIST))}))
+
+    async def async_step_mesh_lamp(self, user_input=None):
+        runtime = self._mesh_runtime()
+        if runtime is None:
+            return self.async_abort(reason="mesh_not_ready")
+        target = getattr(self, "_mesh_target", None)
+        if target not in runtime.clients:
+            return await self.async_step_mesh_lamps()
+        candidates = {target} | {route.gateway for route in runtime.state.routes.values()
+                                 if route.target == target and self._mesh_known_route(route)}
+        saved = runtime.routing.preference(target)
+        saved_ids = saved.get("gateway_ids", {})
+        blocked = [mac for mac in saved.get("blocked", []) if mac in runtime.clients
+                   and saved_ids.get(mac) == runtime.clients[mac].configured_mesh_id]
+        preferred = saved.get("preferred")
+        if preferred not in candidates or saved_ids.get(preferred) != runtime.clients[preferred].configured_mesh_id:
+            preferred = "auto"
+        errors = {}
+        if user_input is not None:
+            preferred = user_input.get("preferred", "auto")
+            blocked = user_input.get("blocked", [])
+            if (not isinstance(preferred, str) or preferred not in candidates | {"auto"} or not isinstance(blocked, list)
+                    or not all(isinstance(mac, str) for mac in blocked)
+                    or not set(blocked) <= runtime.clients.keys()):
+                errors["base"] = "mesh_invalid_gateway"
+            elif preferred in blocked:
+                errors["base"] = "mesh_preferred_blocked"
+            else:
+                ids = {mac: client.configured_mesh_id for mac, client in runtime.clients.items()}
+                runtime.state.set_preferences(target, ids[target], None if preferred == "auto" else preferred,
+                                              blocked, ids)
+                try:
+                    await runtime.storage.flush()
+                except Exception:
+                    if self._mesh_runtime() is not runtime:
+                        return self.async_abort(reason="mesh_not_ready")
+                    if target not in runtime.clients:
+                        return await self.async_step_mesh_lamps()
+                    errors["base"] = "mesh_save_failed"
+                else:
+                    return await self.async_step_mesh()
+        if not isinstance(preferred, str) or preferred not in candidates | {"auto"}:
+            preferred = "auto"
+        blocked = [mac for mac in blocked if isinstance(mac, str) and mac in runtime.clients] if isinstance(blocked, list) else []
+        automatic = SelectOptionDict(value="auto", label=self._mesh_text("Automatisch auswählen", "Select automatically"))
+        return self.async_show_form(step_id="mesh_lamp", errors=errors,
+            description_placeholders={"details": self._mesh_management_details(target)},
+            data_schema=vol.Schema({
+                vol.Required("preferred", default=preferred): SelectSelector(
+                    SelectSelectorConfig(options=[automatic, *self._mesh_options(candidates, target)], mode=SelectSelectorMode.LIST)),
+                vol.Required("blocked", default=blocked): SelectSelector(
+                    SelectSelectorConfig(options=self._mesh_options(runtime.clients, target), multiple=True, mode=SelectSelectorMode.LIST))}))
+
+    def _mesh_direct_mark(self, mac, *, matrix=False):
+        runtime = self._mesh_runtime()
+        evidence = runtime.state.direct.get(mac, {})
+        if evidence.get("mesh_id") != runtime.clients[mac].configured_mesh_id:
+            return "?" if matrix else "—"
+        if evidence.get("confirmed"):
+            suffix = "" if evidence.get("last_status") == "confirmed" else "*"
+            return ("BLE" if matrix else "✓") + suffix
+        return "!" if evidence.get("last_status") == "error" else "?" if matrix else "—"
+
+    def _mesh_route_mark(self, gateway, target):
+        runtime = self._mesh_runtime()
+        key = (gateway, target)
+        route = runtime.state.routes.get(key)
+        if route is not None and self._mesh_known_route(route):
+            return "✓"
+        history = runtime.state.route_history.get(key)
+        if history is not None and self._mesh_known_route(history):
+            return "✓*"
+        last = runtime.state.learning_results.get(key)
+        if last is not None and self._mesh_known_route(last.route) and not last.success:
+            return "–" if last.error == "No valid target reply" else "!"
+        return "?"
+
+    def _mesh_summary(self, report=None):
+        runtime = self._mesh_runtime()
+        if runtime is None:
+            return self._mesh_text("Mesh nicht geladen.", "Mesh not loaded.")
+        # A finished dialog describes its own run, even if a later run has started.
+        results = report.get("results", []) if report is not None else None
+        targets = [mac for mac in (report.get("targets", []) if report is not None else self._mesh_targets())
+                   if mac in runtime.clients]
+        if report is not None and not targets:
+            targets = list(dict.fromkeys(r["route"]["target"] for r in results
+                                        if r["route"]["target"] in runtime.clients))
+        counts = dict(confirmed=0, unconfirmed=0, unchecked=0, error=0)
+        rows = []
+        for target in targets:
+            gateways = []
+            marks = []
+            if results is None:
+                for gateway in runtime.clients:
+                    if gateway == target:
+                        continue
+                    mark = self._mesh_route_mark(gateway, target)
+                    marks.append(mark)
+                    if mark.startswith("✓"):
+                        sample = runtime.state.learning_results.get((gateway, target))
+                        count = f" ({sample.successes}/{sample.attempts})" if sample else ""
+                        gateways.append(f"`0x{runtime.clients[gateway].configured_mesh_id:04X}`" + ("*" if mark.endswith("*") else "") + count)
+            else:
+                for result in results:
+                    route = result["route"]
+                    if route["target"] != target:
+                        continue
+                    mark = "✓" if result["success"] else "–" if result.get("error") == "No valid target reply" else "!"
+                    marks.append(mark)
+                    if result["success"]:
+                        successes = result.get("successful_attempts")
+                        if successes is None:
+                            successes = int(result["success"])
+                        gateways.append(f"`0x{route['gateway_id']:04X}` ({successes}/{result.get('attempts', 1)})")
+            key = "confirmed" if any(m.startswith("✓") for m in marks) else "error" if "!" in marks else "unconfirmed" if "–" in marks else "unchecked"
+            counts[key] += 1
+            status = {"confirmed": self._mesh_text("Bestätigt", "Confirmed"),
+                      "unconfirmed": self._mesh_text("Nicht bestätigt", "Not confirmed"),
+                      "unchecked": self._mesh_text("Nicht geprüft", "Not checked"),
+                      "error": self._mesh_text("Fehler", "Error")}[key]
+            if key == "confirmed" and marks and not any(m == "✓" for m in marks):
+                status += "*"
+            rows.append(f"| `0x{runtime.clients[target].configured_mesh_id:04X}` | {self._mesh_direct_mark(target)} | {status} | {', '.join(gateways) or '—'} |")
+        summary = self._mesh_text(
+            f"**{len(targets)} Lampen · {counts['confirmed']} bestätigt · {counts['unconfirmed']} nicht bestätigt · {counts['unchecked']} nicht geprüft · {counts['error']} Fehler**",
+            f"**{len(targets)} lights · {counts['confirmed']} confirmed · {counts['unconfirmed']} not confirmed · {counts['unchecked']} not checked · {counts['error']} errors**")
+        header = self._mesh_text("| Lampe | Direkt-BLE | Mesh-Status | Bestätigte Gateways |",
+                                 "| Light | Direct BLE | Mesh status | Confirmed gateways |")
+        lines = [summary, "", header, "|---|---|---|---|", *rows]
+        if any("*" in row for row in rows):
+            lines += ["", self._mesh_text("* Früher bestätigt, im letzten Versuch nicht erneut bestätigt. Ein fehlgeschlagener Mesh-Weg wird nicht zur Steuerung verwendet.",
+                                          "* Previously confirmed, not confirmed again in the last attempt. A failed mesh route is not used for control.")]
+        return "\n".join(lines)
+
+    def _mesh_management_details(self, target):
+        runtime = self._mesh_runtime()
+        client = runtime.clients[target]
+        device = runtime.devices.get(target, {})
+        name = self._mesh_cell(device.get("name") or device.get("model") or target)
+        saved = runtime.routing.preference(target)
+        ids = saved.get("gateway_ids", {})
+        def label(mac):
+            return f"`0x{runtime.clients[mac].configured_mesh_id:04X}`"
+        preferred = saved.get("preferred")
+        preferred_label = label(preferred) if preferred in runtime.clients and ids.get(preferred) == runtime.clients[preferred].configured_mesh_id else self._mesh_text("Automatisch", "Automatic")
+        blocked = [label(mac) for mac in saved.get("blocked", []) if mac in runtime.clients and ids.get(mac) == runtime.clients[mac].configured_mesh_id]
+        lines = [f"**{name}**  ", self._mesh_text("Mesh-ID", "Mesh ID") + f": `0x{client.configured_mesh_id:04X}` · MAC: `{target}`  ",
+                 self._mesh_text("Bevorzugte Gateway-Lampe", "Preferred gateway light") + f": **{preferred_label}** · " + self._mesh_text("Gesperrt", "Blocked") + ": " + (", ".join(blocked) or "—"), "",
+                 self._mesh_text("**Zulässige Gateways**", "**Eligible gateways**"), "",
+                 self._mesh_text("| Gateway | Nachweis |", "| Gateway | Evidence |"), "|---|---|"]
+        for gateway in runtime.clients:
+            if gateway == target:
+                lines.append(f"| {label(gateway)} | " + self._mesh_text("Direkte BLE-Verbindung", "Direct BLE connection") + " |")
+            elif self._mesh_route_mark(gateway, target) == "✓":
+                lines.append(f"| {label(gateway)} | " + self._mesh_text("1911-Zielantwort bestätigt", "1911 target reply confirmed") + " |")
+        return "\n".join(lines)
+
+    async def async_step_mesh_matrix(self, user_input=None):
+        if user_input is not None:
+            return await self.async_step_mesh()
+        runtime = self._mesh_runtime()
+        if runtime is None:
+            return self.async_abort(reason="mesh_not_ready")
+        targets = self._mesh_targets()
+        gateways = [mac for mac in runtime.clients if mac in targets or any(
+            self._mesh_route_mark(mac, target) != "?" for target in targets)]
+        label = lambda mac: f"0x{runtime.clients[mac].configured_mesh_id:04X}"
+        lines = [self._mesh_text("| Gateway ↓ / Ziel → | ", "| Gateway ↓ / Target → | ") + " | ".join(label(mac) for mac in targets) + " |",
+                 "|---|" + "---|" * len(targets)]
+        for gateway in gateways:
+            cells = [self._mesh_direct_mark(gateway, matrix=True) if gateway == target
+                     else self._mesh_route_mark(gateway, target) for target in targets]
+            lines.append(f"| **{label(gateway)}** | " + " | ".join(cells) + " |")
+        lines += ["", self._mesh_text("**Legende:** ✓ Bestätigt · – Nicht bestätigt · ? Nicht geprüft · ! Fehler",
+                                     "**Legend:** ✓ Confirmed · – Not confirmed · ? Not checked · ! Error"), "",
+                  self._mesh_text("BLE = direkter BLE-Einstieg; kein Mesh-Zieltest · * früher bestätigt, im letzten Versuch nicht erneut bestätigt",
+                                  "BLE = direct BLE entry; no mesh target test · * previously confirmed, not confirmed again in the last attempt")]
+        return self.async_show_form(step_id="mesh_matrix", data_schema=vol.Schema({}),
+                                    description_placeholders={"matrix": "\n".join(lines)})
+
+    async def async_step_mesh_metrics(self, user_input=None):
+        runtime = self._mesh_runtime()
+        if runtime is None:
+            return self.async_abort(reason="mesh_not_ready")
+        header = self._mesh_text("Gateway | BLE-Verbindungszeit | Erfolgreich | Signal",
+                                 "Gateway | BLE connection time | Successful | Signal")
+        lines = [f"| {header} |", "|---|---:|---:|---:|"]
+        for mac, client in runtime.clients.items():
+            metric = runtime.state.ble_metrics.get(mac, {})
+            if metric.get("mesh_id") != client.configured_mesh_id:
+                metric = {}
+            durations = metric.get("durations_ms", [])
+            duration = f"{median(durations):.0f} ms" if durations else "—"
+            success = f"{metric['successful']}/{metric['attempts']}" if metric else "—"
+            rssi = metric.get("last_rssi")
+            lines.append(f"| `0x{client.configured_mesh_id:04X}` | {duration} | {success} | {str(rssi) + ' dBm' if rssi is not None else '—'} |")
+        started = runtime.state.ble_metrics_started_at
+        date_format = self._mesh_text("%d.%m.%Y · %H:%M", "%Y-%m-%d · %H:%M")
+        period = dt_util.as_local(datetime.fromisoformat(started)).strftime(date_format) if started else "—"
+        lines += ["", self._mesh_text("**Messwerte seit:** ", "**Metrics since:** ") + period]
+        if not runtime.state.ble_metrics:
+            lines += ["", self._mesh_text(
+                "Noch keine Gateway-Verbindungsversuche seit dem letzten Zurücksetzen gespeichert. Verbindungszeit, Erfolgszähler und RSSI werden bei den nächsten echten BLE-Verbindungen durch Mesh-Anlernen oder normale Lampensteuerung neu erfasst. Es werden dafür keine zusätzlichen Testverbindungen aufgebaut.",
+                "No gateway connection attempts have been stored since the last reset. Connection time, success counters, and RSSI will be collected again on the next real BLE connections from mesh learning or normal light control. No extra test connections are created for metrics.")]
+        else:
+            lines += ["", self._mesh_text(
+                "BLE-Verbindungszeit = Median erfolgreicher BLE-Verbindungsaufbauten; Anmeldung und Bestätigungswartezeit sind nicht enthalten. Erfolgreich = erfolgreiche Gateway-Verbindungen / Gateway-Verbindungsversuche. Signal = zuletzt bei einem Gateway-Verbindungsversuch gespeicherter RSSI. Die Statistik wird bei echten neuen BLE-Verbindungen aus Mesh-Anlernen und normaler Lampensteuerung erfasst; bereits bestehende Verbindungen erzeugen keine zusätzliche Messung. Für die automatische Auswahl werden höchstens die letzten 50 Verbindungsversuche als aktuelle Qualitätsbasis verwendet.",
+                "BLE connection time = median successful BLE connection establishment time; authentication and confirmation wait time are not included. Successful = successful gateway connections / gateway connection attempts. Signal = the last RSSI stored during a gateway connection attempt. Metrics are collected from real new BLE connections during mesh learning and normal light control; reusing an existing connection does not create another measurement. Automatic selection uses at most the 50 most recent connection attempts as its current quality basis.")]
+        lines += ["", self._mesh_text(
+            "**Hinweis:** Nach deutlichen Änderungen am Standort von Lampen oder Bluetooth-Proxys empfiehlt es sich, die BLE-Messwerte zurückzusetzen und das Mesh erneut anzulernen. Mehrere Anlernvorgänge können belastbarere Vergleichswerte liefern. Einzelne langsame Verbindungen erfordern keinen Reset.",
+            "**Note:** After substantial changes to light or Bluetooth proxy locations, reset the BLE measurements and learn the mesh again. Multiple learning runs can provide more reliable comparisons. A single slow connection does not require a reset.")]
+        return self.async_show_menu(step_id="mesh_metrics", menu_options=["mesh_metrics_reset", "mesh"],
+                                    description_placeholders={"metrics": "\n".join(lines)})
+
+    async def async_step_mesh_metrics_reset(self, user_input=None):
+        runtime = self._mesh_runtime()
+        if runtime is None:
+            return self.async_abort(reason="mesh_not_ready")
+        errors = {}
+        if user_input is not None:
+            runtime.state.metrics.clear()
+            runtime.state.ble_metrics.clear()
+            runtime.state.ble_metrics_started_at = dt_util.utcnow().isoformat()
+            runtime.state.changed()
+            try:
+                await runtime.storage.flush()
+            except Exception:
+                errors["base"] = "mesh_save_failed"
+            else:
+                return await self.async_step_mesh_metrics()
+        return self.async_show_form(step_id="mesh_metrics_reset", data_schema=vol.Schema({}), errors=errors)

@@ -70,6 +70,12 @@ SENSOR_DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
         entity_category=EntityCategory.DIAGNOSTIC,
         icon="mdi:bluetooth-connect",
     ),
+    SensorEntityDescription(
+        key="last_mesh_gateway",
+        translation_key="last_mesh_gateway",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        icon="mdi:access-point-network",
+    ),
 )
 
 
@@ -114,7 +120,7 @@ class AwoxConnectZDiagnosticSensor(RestoreSensor):
 
         if description.key == "bluetooth_status":
             self._attr_options = [
-                "connected", "visible", "recently_connected", "unreachable"
+                "connected", "visible", "recently_connected", "mesh_connected", "mesh_available", "unreachable"
             ]
 
         self._attr_device_info = build_device_info(mac, device)
@@ -158,6 +164,9 @@ class AwoxConnectZDiagnosticSensor(RestoreSensor):
             return self._client.last_seen
         if key == "bluetooth_status":
             return self._client.bluetooth_status
+        if key == "last_mesh_gateway":
+            gateway = self._client.last_mesh_gateway
+            return f"0x{gateway:04X}" if gateway is not None else None
         if key == "mesh_id":
             return f"0x{self._mesh_id:04X}"
         if key == "current_bluetooth_source":

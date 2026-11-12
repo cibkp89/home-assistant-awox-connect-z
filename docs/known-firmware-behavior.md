@@ -104,7 +104,9 @@ intermediate as a completed stop; see
 Reported brightness can remain outdated after a transition, and reported ON does
 not prove physical light output. A successful group-confirmation reply may update
 the native-effect color/CCT display; other 1911 replies do not synchronize HA.
-Effect advertisements preserve the displayed appearance. See
+Effect advertisements also update convertible color/CCT and color mode; hue
+`0xFF` retains the previous HS value. Color cycle appearance is a momentary
+sample, not a fixed target. See
 [the display rules](command-sequences.md#native-effect-replies-and-displayed-appearance).
 
 ## Command sequencing and spacing

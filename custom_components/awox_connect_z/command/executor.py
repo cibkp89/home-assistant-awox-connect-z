@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from ..client import (
     AwoxConnectZClient,
     AwoxConnectZError,
+    CommandPreparationFailed,
     RuntimeCommandResult,
     RuntimeCommandStatus,
     RuntimeSelectedCommand,
@@ -229,7 +230,10 @@ class CommandExecutor:
             self._group_cutoff = None
             self.last_confirmed_state = None
             commands = []
+            preparation_cutoff = self._manager.request_generation
             try:
+                if self._manager.peek_next_command() is None:
+                    return ()
                 async with self._client.status_transaction():
                     while self._manager.peek_next_command() is not None:
                         if commands:
@@ -277,10 +281,18 @@ class CommandExecutor:
                         # not the optimistic state of the completed writes.
                         self._manager.set_state(PlannerState(True, state.power, state.effect))
                         self.last_confirmed_state = state
+                        note_confirmed = getattr(self._client, "note_confirmed", None)
+                        if note_confirmed is not None:
+                            note_confirmed()
                     return tuple(item.command for item in commands)
             except asyncio.CancelledError:
                 self._manager.set_state(PlannerState(known=False))
                 raise
+            except CommandPreparationFailed as err:
+                # Preserve the existing pre-selection cutoff: a newer request
+                # accepted during a failed preparation has not itself failed.
+                failed = self._manager.abort_pending_through(preparation_cutoff)
+                raise CommandExecutionFailed(str(err), failed_generations=failed) from err
             except Exception as err:
                 if commands:
                     failed = self._manager.set_state(PlannerState(known=False))
@@ -393,85 +405,7 @@ class CommandExecutor:
         raise CommandExecutorError(f"Unsupported client result: {status!r}")
 
     def _prepare_command(self, command: PlannedCommand) -> PreparedCommand:
-        kind = command.kind
-        transition = (
-            self._default_transition
-            if command.transition is None
-            else float(command.transition)
-        )
-
-        if kind is CommandKind.POWER_ON or kind is CommandKind.POWER_OFF:
-            on = kind is CommandKind.POWER_ON
-            return PreparedCommand(
-                command,
-                make_power(on, mesh_id=self._mesh_id),
-                "power:on" if on else "power:off",
-            )
-
-        if kind is CommandKind.BRIGHTNESS_ON:
-            if command.value is None:
-                raise CommandExecutorError("BRIGHTNESS_ON requires a value")
-            brightness = int(command.value)
-            return PreparedCommand(
-                command,
-                make_brightness(
-                    brightness,
-                    transition,
-                    mesh_id=self._mesh_id,
-                ),
-                f"brightness:{brightness}",
-            )
-
-        if kind is CommandKind.COLOR:
-            if command.value is None:
-                raise CommandExecutorError("COLOR requires an HS value")
-            try:
-                hue, saturation = command.value
-            except (TypeError, ValueError) as err:
-                raise CommandExecutorError(
-                    f"Invalid COLOR value: {command.value!r}"
-                ) from err
-            hue = float(hue)
-            saturation = float(saturation)
-            return PreparedCommand(
-                command,
-                make_hs_color(
-                    hue,
-                    saturation,
-                    transition,
-                    mesh_id=self._mesh_id,
-                ),
-                f"hs:{hue:.1f},{saturation:.1f}",
-            )
-
-        if kind is CommandKind.CCT:
-            if command.value is None:
-                raise CommandExecutorError("CCT requires a Kelvin value")
-            kelvin = int(command.value)
-            return PreparedCommand(
-                command,
-                make_color_temp_kelvin(
-                    kelvin,
-                    transition,
-                    mesh_id=self._mesh_id,
-                ),
-                f"color_temp:{kelvin}K",
-            )
-
-        if kind is CommandKind.EFFECT_START or kind is CommandKind.EFFECT_STOP:
-            start = kind is CommandKind.EFFECT_START
-            effect = self._require_effect(command.value, for_stop=not start)
-            if effect == EFFECT_COLOR_CYCLE:
-                builder = make_color_cycle_start if start else make_color_cycle_stop
-                frame = builder(mesh_id=self._mesh_id)
-                label = "color_cycle"
-            else:
-                frame = make_candle_effect(start, mesh_id=self._mesh_id)
-                label = "candle"
-            action = "start" if start else "stop"
-            return PreparedCommand(command, frame, f"effect:{label}:{action}")
-
-        raise CommandExecutorError(f"Unsupported command kind: {kind!r}")
+        return prepare_command(command, self._mesh_id, self._default_transition)
 
     @staticmethod
     def _require_effect(value: object | None, *, for_stop: bool) -> str:
@@ -500,3 +434,86 @@ __all__ = [
     "PreparedCommand",
     "UnsupportedEffectError",
 ]
+
+
+def prepare_command(command: PlannedCommand, mesh_id: int, default_transition: float) -> PreparedCommand:
+    kind = command.kind
+    transition = (
+        default_transition
+        if command.transition is None
+        else float(command.transition)
+    )
+
+    if kind is CommandKind.POWER_ON or kind is CommandKind.POWER_OFF:
+        on = kind is CommandKind.POWER_ON
+        return PreparedCommand(
+            command,
+            make_power(on, mesh_id=mesh_id),
+            "power:on" if on else "power:off",
+        )
+
+    if kind is CommandKind.BRIGHTNESS_ON:
+        if command.value is None:
+            raise CommandExecutorError("BRIGHTNESS_ON requires a value")
+        brightness = int(command.value)
+        return PreparedCommand(
+            command,
+            make_brightness(
+                brightness,
+                transition,
+                mesh_id=mesh_id,
+            ),
+            f"brightness:{brightness}",
+        )
+
+    if kind is CommandKind.COLOR:
+        if command.value is None:
+            raise CommandExecutorError("COLOR requires an HS value")
+        try:
+            hue, saturation = command.value
+        except (TypeError, ValueError) as err:
+            raise CommandExecutorError(
+                f"Invalid COLOR value: {command.value!r}"
+            ) from err
+        hue = float(hue)
+        saturation = float(saturation)
+        return PreparedCommand(
+            command,
+            make_hs_color(
+                hue,
+                saturation,
+                transition,
+                mesh_id=mesh_id,
+            ),
+            f"hs:{hue:.1f},{saturation:.1f}",
+        )
+
+    if kind is CommandKind.CCT:
+        if command.value is None:
+            raise CommandExecutorError("CCT requires a Kelvin value")
+        kelvin = int(command.value)
+        return PreparedCommand(
+            command,
+            make_color_temp_kelvin(
+                kelvin,
+                transition,
+                mesh_id=mesh_id,
+            ),
+            f"color_temp:{kelvin}K",
+        )
+
+    if kind is CommandKind.EFFECT_START or kind is CommandKind.EFFECT_STOP:
+        start = kind is CommandKind.EFFECT_START
+        effect = CommandExecutor._require_effect(command.value, for_stop=not start)
+        if effect == EFFECT_COLOR_CYCLE:
+            builder = make_color_cycle_start if start else make_color_cycle_stop
+            frame = builder(mesh_id=mesh_id)
+            label = "color_cycle"
+        else:
+            frame = make_candle_effect(start, mesh_id=mesh_id)
+            label = "candle"
+        action = "start" if start else "stop"
+        return PreparedCommand(command, frame, f"effect:{label}:{action}")
+
+    raise CommandExecutorError(f"Unsupported command kind: {kind!r}")
+

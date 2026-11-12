@@ -150,7 +150,7 @@ class PendingDisplayTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(entity._manager.pending_generations)
         self.assertEqual(client.confirmation.diagnostics['confirmed'], 1)
         self.assertEqual(client.confirmation.diagnostics['unconfirmed'], 1)
-        self.assertEqual(client.polls, 14)
+        self.assertEqual(client.polls, 10)
         self.assertEqual(len(client.replays), 1)
         self.assertTrue(published)
         self.assertTrue(all(not state['known'] for state in published))

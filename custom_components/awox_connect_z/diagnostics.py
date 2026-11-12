@@ -58,8 +58,9 @@ def build_client_diagnostics(client: AwoxConnectZClient) -> dict:
     status = (
         evidence.snapshot_status
         if evidence.snapshot_active
-        else evidence.status(
-            time.monotonic(), client.availability_timeout, connected=connected
+        else evidence.combine_status(
+            evidence.status(time.monotonic(), client.availability_timeout, connected=connected),
+            client.mesh_status_provider() if client.mesh_status_provider else None,
         )
     )
     source_id = evidence.source
@@ -67,7 +68,9 @@ def build_client_diagnostics(client: AwoxConnectZClient) -> dict:
     last_seen = evidence.last_seen
     return {
         "status_1911": client.status_1911.diagnostics(),
-        "command_confirmation": dict(client.confirmation.diagnostics),
+        "command_confirmation": dict((client.mesh_dispatch.confirmation
+                                      if client.mesh_dispatch else client.confirmation).diagnostics),
+        "mesh": client.mesh_dispatch.runtime.diagnostics() if client.mesh_dispatch else None,
         "initial_status_polls": client._initial_status_polls,
         "status_notify_method": client._status_notify_method,
         "mac": client.mac,

@@ -161,20 +161,159 @@
   "options": {
     "step": {
       "init": {
-        "title": "AwoX Connect.Z Optionen",
+        "title": "AwoX Connect.Z",
+        "description": "Wähle, was du öffnen möchtest. Die Mesh-Verwaltung bündelt Mesh-Anlernen, Lampenregeln und Messwerte.",
+        "menu_options": {
+          "runtime": "Laufzeit-Einstellungen",
+          "mesh": "Mesh-Verwaltung"
+        },
+        "menu_option_descriptions": {
+          "runtime": "Die vorhandenen Einstellungen für Übergang, BLE-Leerlauf, Parallelität und Verfügbarkeit.",
+          "mesh": "Mesh anlernen, Lampenregeln und Messwerte für das Connect.Z Mesh."
+        }
+      },
+      "runtime": {
+        "title": "Laufzeit-Einstellungen",
         "data": {
           "default_transition": "Standard-Übergang in Sekunden",
           "command_interval_ms": "Mindestabstand zwischen Befehlen (ms)",
           "idle_disconnect": "BLE nach Leerlauf trennen (Sekunden)",
           "max_concurrent_commands": "Maximal gleichzeitige Lampenbefehle",
-          "availability_timeout": "Nicht verfügbar nach (Sekunden)"
+          "availability_timeout": "Nicht verfügbar nach (Sekunden)",
+          "mesh_enabled": "Mesh-Steuerung verwenden"
         },
         "data_description": {
           "max_concurrent_commands": "Maximale Anzahl an AwoX-Lampenbefehlen, die für diesen Mesh-Eintrag gleichzeitig laufen dürfen (1-32). Neue Runtime-BLE-Verbindungsaufbauten werden separat koordiniert, damit wartende Verbindungen nicht ihr eigenes Connect-Zeitlimit verbrauchen.",
           "availability_timeout": "Zeit ohne Bluetooth-Lebenszeichen oder funktionierende HA-Verbindung, nach der eine Lampe als nicht verfügbar gilt (10–300 Sekunden).",
-          "command_interval_ms": "Mindestzeit zwischen aufeinanderfolgenden GATT-Schreibvorgängen an dieselbe Lampe (0–2000 ms). 0 deaktiviert den absichtlichen Abstand."
+          "command_interval_ms": "Mindestzeit zwischen aufeinanderfolgenden GATT-Schreibvorgängen an dieselbe Lampe (0–2000 ms). 0 deaktiviert den absichtlichen Abstand.",
+          "mesh_enabled": "Aktiviert bestätigte Mesh-Wege und gespeicherte Gateway-Regeln. Bei deaktiviertem Mesh werden Lampen direkt gesteuert; gespeicherte Ergebnisse und Regeln bleiben erhalten."
         }
+      },
+      "mesh": {
+        "title": "Mesh-Verwaltung",
+        "description": "Mesh-Status, Anlernen, Lampeneinstellungen und BLE-Messwerte verwalten.",
+        "menu_options": {
+          "mesh_overview": "Übersicht",
+          "mesh_learn": "Mesh anlernen",
+          "mesh_lamps": "Lampen verwalten",
+          "mesh_matrix": "Mesh-Matrix",
+          "mesh_metrics": "Gateway-Lampen · BLE-Messwerte",
+          "init": "Zurück",
+          "mesh_observe": "Laufendes Anlernen anzeigen",
+          "mesh_cancel": "Anlernen abbrechen"
+        },
+        "menu_option_descriptions": {
+          "mesh_overview": "Gespeicherte Anlernergebnisse und bestätigte Wege pro Lampe.",
+          "mesh_learn": "Ermittelt die möglichen Steuerverbindungen zwischen den vorhandenen Lampen.",
+          "mesh_lamps": "Bevorzugte und gesperrte Gateways pro Lampe für die automatische Laufzeit-Auswahl verwalten.",
+          "mesh_matrix": "Alle geprüften Gateway-Ziel-Kombinationen im Überblick.",
+          "mesh_metrics": "Echte BLE-Verbindungswerte aus Mesh-Anlernen und normaler Lampensteuerung."
+        }
+      },
+      "mesh_overview": {
+        "title": "Mesh-Übersicht",
+        "description": "{overview}",
+        "submit": "Zurück"
+      },
+      "mesh_learn": {
+        "title": "Mesh anlernen",
+        "description": "Ermittelt, über welche Gateway-Lampen deine vorhandenen Lampen gesteuert werden können. Dazu werden gültige Zielantworten über die 1911-Statusabfrage geprüft. Die Lampen werden dabei nicht ein- oder ausgeschaltet.\n\n**Während des Anlernens keine Lampen manuell, per App, Automation oder Schalter verändern.** Verbindungs- oder Stromunterbrechungen können die Prüfung verfälschen.\n\n**Es werden keine neuen Geräte hinzugefügt.** Bei vielen Lampen kann das Anlernen länger dauern.",
+        "data": {
+          "targets": "Ziellampen"
+        },
+        "data_description": {
+          "targets": "Diese Lampen werden als Ziele angelernt. Andere vorhandene Lampen können als Gateway dienen."
+        },
+        "submit": "Anlernen starten"
+      },
+      "mesh_progress": {
+        "title": "Anlernen läuft",
+        "description": ""
+      },
+      "mesh_result": {
+        "title": "Ergebnis",
+        "description": "{result}",
+        "menu_options": {
+          "mesh_result_back": "Zurück"
+        }
+      },
+      "mesh_cancel": {
+        "title": "Anlernen abbrechen",
+        "description": "Das laufende Anlernen beenden? Bereits abgeschlossene Ergebnisse bleiben erhalten.",
+        "submit": "Anlernen beenden"
+      },
+      "mesh_lamps": {
+        "title": "Lampen verwalten",
+        "description": "Wähle eine Ziellampe. Bevorzugte und gesperrte Gateways werden dauerhaft gespeichert und von der normalen Lampensteuerung verwendet.",
+        "data": {
+          "target": "Ziellampe"
+        },
+        "data_description": {
+          "target": "Nur konfigurierte Lampen dieses Hubs werden angezeigt."
+        },
+        "submit": "Öffnen"
+      },
+      "mesh_lamp": {
+        "title": "Gateway-Einstellungen",
+        "description": "{details}\n\n**Gateway-Auswahl**\n\nDie Integration nutzt die direkte Verbindung oder einen bestätigten Mesh-Weg. Ein geeignetes bevorzugtes Gateway wird zuerst versucht; gesperrte Gateways bleiben ausgeschlossen. Andernfalls erfolgt die Auswahl anhand verfügbarer Verbindungen und gespeicherter BLE-Messwerte. Bei einem Verbindungsfehler vor dem Schreiben wird, soweit möglich, genau eine Alternative versucht.\n\nNach dem Speichern geht es zurück zur Mesh-Verwaltung.",
+        "data": {
+          "preferred": "Bevorzugte Gateway-Lampe",
+          "blocked": "Gesperrte Gateway-Lampen"
+        },
+        "data_description": {
+          "preferred": "Wird zuerst versucht, sofern die Lampe noch ein zulässiger Kandidat ist. Ist die Verbindung vor dem Schreiben nicht möglich, kann einmal auf eine geeignete Alternative ausgewichen werden.",
+          "blocked": "Diese Gateways werden für dieses Ziel immer ausgeschlossen. Wird „Diese Lampe – direkte BLE-Verbindung“ gesperrt, ist auch der direkte Weg zu dieser Lampe gesperrt."
+        },
+        "submit": "Speichern"
+      },
+      "mesh_matrix": {
+        "title": "Mesh-Matrix",
+        "description": "{matrix}",
+        "submit": "Zurück"
+      },
+      "mesh_metrics": {
+        "title": "Gateway-Lampen · BLE-Messwerte",
+        "description": "{metrics}",
+        "menu_options": {
+          "mesh_metrics_reset": "BLE-Messwerte zurücksetzen",
+          "mesh": "Zurück"
+        },
+        "menu_option_descriptions": {
+          "mesh_metrics_reset": "Löscht Verbindungszeiten, Erfolgszähler und gespeicherte RSSI-Werte. Mesh-Ergebnisse und Gateway-Einstellungen bleiben erhalten."
+        }
+      },
+      "mesh_metrics_reset": {
+        "title": "BLE-Messwerte zurücksetzen",
+        "description": "Löscht **alle gespeicherten BLE-Messwerte** dieses Mesh-Netzes: Verbindungszeiten, Verbindungsversuche/-erfolge und RSSI-Werte.\n\n**Nicht gelöscht werden:** Mesh-Anlernergebnisse, Mesh-Matrix, bevorzugte Gateways und gesperrte Gateways.\n\nDie Statistik beginnt anschließend neu.",
+        "submit": "Zurücksetzen"
+      },
+      "mesh_observe": {
+        "title": "Laufendes Anlernen anzeigen"
+      },
+      "mesh_result_back": {
+        "title": "Zurück"
+      },
+      "mesh_cancelled": {
+        "title": "Anlernen abgebrochen",
+        "description": "Das Anlernen wurde kontrolliert beendet. Bereits gespeicherte Ergebnisse bleiben erhalten.\n\n{result}",
+        "submit": "Zurück"
       }
+    },
+    "error": {
+      "mesh_not_ready": "Mesh ist noch nicht geladen oder für diesen Eintrag deaktiviert.",
+      "mesh_no_targets": "Wähle mindestens eine konfigurierte, aktivierte Ziellampe.",
+      "mesh_learning_running": "In diesem Mesh-Netzwerk läuft bereits ein Anlernen.",
+      "mesh_invalid_target": "Diese Ziellampe ist nicht mehr geladen.",
+      "mesh_invalid_gateway": "Wähle nur vorhandene Gateways; eine Bevorzugung erfordert einen bekannten Weg.",
+      "mesh_preferred_blocked": "Ein bevorzugtes Gateway darf nicht gleichzeitig gesperrt sein.",
+      "mesh_save_failed": "Die Änderung ist im Arbeitsspeicher aktiv, konnte aber nicht dauerhaft gespeichert werden. Bitte erneut speichern.",
+      "mesh_learning_changed": "Der Anlernlauf hat sich inzwischen geändert. Bitte prüfe erneut, ob du den aktuellen Lauf abbrechen möchtest."
+    },
+    "abort": {
+      "mesh_not_ready": "Mesh ist noch nicht geladen oder für diesen Eintrag deaktiviert."
+    },
+    "progress": {
+      "mesh_learning": "Mesh-Wege werden geprüft\n\n{status}"
     }
   },
   "entity": {
@@ -186,12 +325,14 @@
         "name": "Letzte Sichtung"
       },
       "bluetooth_status": {
-        "name": "Bluetooth-Status",
+        "name": "Verbindungsstatus",
         "state": {
           "connected": "Verbunden",
           "visible": "Sichtbar",
           "unreachable": "Nicht erreichbar",
-          "recently_connected": "Zuletzt verbunden"
+          "recently_connected": "Zuletzt verbunden",
+          "mesh_connected": "Mesh verbunden",
+          "mesh_available": "Mesh verfügbar"
         }
       },
       "mesh_id": {
@@ -202,6 +343,9 @@
       },
       "last_connection": {
         "name": "Letzte Verbindung"
+      },
+      "last_mesh_gateway": {
+        "name": "Letztes Mesh-Gateway"
       }
     }
   }

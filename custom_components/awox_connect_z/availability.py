@@ -26,7 +26,14 @@ class AvailabilityState:
 
     @staticmethod
     def is_available(status: str | None) -> bool:
-        return status in ("connected", "visible", "recently_connected")
+        return status in ("connected", "visible", "recently_connected", "mesh_connected", "mesh_available")
+
+    @staticmethod
+    def combine_status(direct: str | None, mesh: str | None) -> str | None:
+        """Keep the newest valid direct proof; otherwise use a target mesh path."""
+        if direct in ("connected", "visible", "recently_connected"):
+            return direct
+        return mesh if mesh is not None else direct
 
     def note_advertisement(
         self, seen_time: float, *, source: str | None, rssi: int | None,

@@ -33,6 +33,12 @@ suites = (
     "test_cloud_data_reuse.py",
     "test_twenty_minute_cleanup.py",
     "test_additional_cleanup.py",
+    "test_mesh.py",
+    "test_mesh_ui.py",
+    "test_mesh_ui_restoration.py",
+    "test_mesh_parallel.py",
+    "test_mesh_deep_review.py",
+    "test_mesh_learning_five.py",
 )
 for name in suites:
     result = subprocess.run([sys.executable, str(root / name)], check=False)
