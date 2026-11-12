@@ -23,8 +23,7 @@ from .client import AwoxConnectZClient
 from .device_info import build_device_info
 from .const import (
     DOMAIN,
-    RSSI_MIN_PUBLISH_INTERVAL_SECONDS,
-    RSSI_SIGNIFICANT_CHANGE_DBM,
+    DIAGNOSTIC_MIN_PUBLISH_INTERVAL_SECONDS,
 )
 
 
@@ -45,6 +44,7 @@ SENSOR_DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
         translation_key="last_seen",
         device_class=SensorDeviceClass.TIMESTAMP,
         entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
     ),
     SensorEntityDescription(
         key="bluetooth_status",
@@ -212,16 +212,17 @@ class AwoxConnectZDiagnosticSensor(RestoreSensor):
         now = time.monotonic()
         key = self.entity_description.key
 
-        # RSSI naturally jitters with nearly every advertisement. Keep it useful
-        # for diagnostics without creating a recorder entry every second: large
-        # jumps are immediate, small changes are sampled at most every 5 seconds.
+        # RSSI and last-seen change with nearly every advertisement. Keep them
+        # useful for diagnostics without creating a recorder entry per packet:
+        # once a value is published, the next one follows after the interval at
+        # the earliest. The first value and a change to "no value" stay immediate.
         if (
-            key == "signal_strength"
+            key in ("signal_strength", "last_seen")
             and previous is not _UNSET
-            and isinstance(previous, (int, float))
-            and isinstance(value, (int, float))
-            and now - self._last_published_at < RSSI_MIN_PUBLISH_INTERVAL_SECONDS
-            and abs(value - previous) < RSSI_SIGNIFICANT_CHANGE_DBM
+            and previous is not None
+            and value is not None
+            and now - self._last_published_at
+            < DIAGNOSTIC_MIN_PUBLISH_INTERVAL_SECONDS
         ):
             return
 
