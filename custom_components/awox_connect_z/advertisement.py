@@ -6,9 +6,11 @@ from dataclasses import dataclass
 
 from .const import STATUS_EFFECTS
 
-# Connect.Z manufacturer-data prefix used by the supported device profile.
-# Bytes 2-5 contain the lower four MAC bytes in reverse order.
+# Connect.Z manufacturer-data prefixes of the supported device profiles:
+# 96 20 = RGB/TW lamps (EGLO-ZM-RGB-TW), 97 20 = tunable-white lamps
+# (EGLO-ZM-TW). Bytes 2-5 contain the lower four MAC bytes in reverse order.
 AWOX_CONNECT_Z_DATA_PREFIX = bytes((0x96, 0x20))
+AWOX_CONNECT_Z_DATA_PREFIXES = (AWOX_CONNECT_Z_DATA_PREFIX, bytes((0x97, 0x20)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,7 +55,7 @@ def advertisement_matches_address(data: bytes, address: str) -> bool:
 
     return (
         len(data) >= 6
-        and data.startswith(AWOX_CONNECT_Z_DATA_PREFIX)
+        and data.startswith(AWOX_CONNECT_Z_DATA_PREFIXES)
         and bytes(reversed(data[2:6])) == mac[-4:]
     )
 
