@@ -124,8 +124,9 @@ AVAILABILITY_RECOVERY_POLL_SECONDS = 1.0
 # Small lower bound that avoids a zero/near-zero availability wait loop.
 AVAILABILITY_MIN_WAIT_SECONDS = 0.05
 # RSSI diagnostic throttling: publish sooner only for a significant change.
-RSSI_MIN_PUBLISH_INTERVAL_SECONDS = 5.0
-RSSI_SIGNIFICANT_CHANGE_DBM = 5
+# Signal strength and last-seen change with nearly every advertisement.
+# Publish them at most once per interval so they do not flood the recorder.
+DIAGNOSTIC_MIN_PUBLISH_INTERVAL_SECONDS = 60.0
 
 
 # -----------------------------------------------------------------------------
