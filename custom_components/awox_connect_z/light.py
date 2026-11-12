@@ -40,12 +40,27 @@ from .const import (
     CONF_COMMAND_INTERVAL_MS,
     DEFAULT_COMMAND_INTERVAL_MS,
     DOMAIN,
+    EFFECT_CANDLE,
     MAX_COLOR_TEMP_KELVIN,
     MAX_COMMAND_INTERVAL_MS,
     MIN_COLOR_TEMP_KELVIN,
     MIN_COMMAND_INTERVAL_MS,
     NATIVE_EFFECTS,
 )
+
+
+def device_is_white_only(device: dict[str, Any]) -> bool:
+    """Return whether the stored metadata identifies a tunable-white lamp.
+
+    Cloud metadata names these lamps EGLO-ZM-TW with a ``.white.`` device
+    type; RGB lamps are EGLO-ZM-RGB-TW. Lamps without such metadata (manual
+    or Bluetooth-discovered entries) keep the full RGB/TW feature set.
+    """
+    model = str(device.get("model") or "").upper()
+    device_type = str(device.get("device_type") or "").lower()
+    if "RGB" in model or "color" in device_type or "rgb" in device_type:
+        return False
+    return model.endswith("-TW") or ".white." in device_type
 
 
 def planner_state_from_advertisement(state: AwoxAdvertisementState) -> PlannerState:
@@ -116,6 +131,12 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
         self._device = device
         self._mac = client.mac
         self._mesh_id = int(device["mesh_id"])
+        self._white_only = device_is_white_only(device)
+        if self._white_only:
+            # Tunable-white lamps have no colour LEDs: offer neither the HS
+            # colour mode nor the colour-cycle effect.
+            self._attr_supported_color_modes = {ColorMode.COLOR_TEMP}
+            self._attr_effect_list = [EFFECT_OFF, EFFECT_CANDLE]
 
         self._manager = CommandManager(
             PlannerState(known=False, is_on=None, effect=None),
@@ -180,7 +201,7 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
             if color_temp_kelvin is not None:
                 self._attr_color_temp_kelvin = int(color_temp_kelvin)
             mode = last.attributes.get(ATTR_COLOR_MODE)
-            if mode in (ColorMode.HS, ColorMode.HS.value):
+            if mode in (ColorMode.HS, ColorMode.HS.value) and not self._white_only:
                 self._attr_color_mode = ColorMode.HS
             elif mode in (ColorMode.COLOR_TEMP, ColorMode.COLOR_TEMP.value):
                 self._attr_color_mode = ColorMode.COLOR_TEMP
@@ -250,7 +271,7 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
         # Advertisements and final confirmations supply effect appearance too.
         # A hue without a defined angle still cannot replace the last HS value.
         if update_effect_appearance or state.effect not in NATIVE_EFFECTS:
-            if state.is_color_mode:
+            if state.is_color_mode and not self._white_only:
                 if (
                     state.hue_degrees is not None
                     and state.saturation_percent is not None
@@ -463,6 +484,13 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Submit one combined Home Assistant ON target."""
+        if self._white_only and (
+            ATTR_HS_COLOR in kwargs
+            or kwargs.get(ATTR_EFFECT) not in (None, *self._attr_effect_list)
+        ):
+            raise HomeAssistantError(
+                "This AwoX Connect.Z lamp is tunable white only and has no colour functions"
+            )
         await self._async_submit_target(target_from_light_kwargs(kwargs, self._client.default_transition))
 
     async def async_turn_off(self, **kwargs: Any) -> None:
