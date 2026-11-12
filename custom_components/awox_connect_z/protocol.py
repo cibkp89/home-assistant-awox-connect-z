@@ -261,7 +261,9 @@ def parse_status_1911(session_key: bytes, payload: bytes) -> dict:
     if len(payload) != 20 or payload[0] not in (0x80, 0x82) or payload[19] != 0x60:
         raise ValueError("Unsupported 1911 envelope")
     block = aes_decrypt_reversed(session_key, payload[1:17])
-    if block[5:7] != b"\x96\x20" or block[12] not in STATUS_EFFECTS:
+    # The reply repeats the lamp's product marker: 96 20 on RGB/TW lamps,
+    # 97 20 on tunable-white lamps (EGLO-ZM-TW).
+    if block[5:7] not in (b"\x96\x20", b"\x97\x20") or block[12] not in STATUS_EFFECTS:
         raise ValueError("Unsupported 1911 state")
     # Color Cycle can report FF as a dynamic hue. Preserve native-effect
     # packets (including Candle) without treating FF as a static color angle.
