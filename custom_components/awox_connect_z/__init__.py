@@ -181,10 +181,30 @@ async def async_setup_entry(
                 if not _tracking["active"]:
                     return
                 # The callback represents a received packet, not a history replay.
+                # Every proxy in range delivers its own copy of each packet. Only
+                # the proxy Home Assistant currently prefers may update source and
+                # RSSI; otherwise both diagnostics flip on every packet. Liveness
+                # (the timestamp) still counts for packets from any proxy.
+                preferred = bluetooth.async_last_service_info(
+                    hass, _client.mac, connectable=False
+                )
+                from_preferred = (
+                    preferred is None
+                    or preferred.source is None
+                    or preferred.source == service_info.source
+                )
                 _client.async_note_bluetooth_liveness(
                     service_info.time,
-                    source=str(service_info.source) if service_info.source is not None else None,
-                    rssi=int(service_info.rssi) if service_info.rssi is not None else None,
+                    source=(
+                        str(service_info.source)
+                        if from_preferred and service_info.source is not None
+                        else None
+                    ),
+                    rssi=(
+                        int(service_info.rssi)
+                        if from_preferred and service_info.rssi is not None
+                        else None
+                    ),
                 )
                 packet = getattr(service_info, "raw", None)
                 if packet is None:
